@@ -27,6 +27,7 @@ target_link_libraries(${MODULE_NAME}
     PRIVATE
         everest::helpers
         everest::util
+        everest::phase_rotation
         Pal::Sigslot
         pugixml::pugixml
 )

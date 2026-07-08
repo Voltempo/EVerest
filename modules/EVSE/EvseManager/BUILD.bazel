@@ -17,6 +17,7 @@ cc_everest_module(
         "@sigslot//:sigslot",
         "//lib/everest/helpers",
         "//lib/everest/util",
+        "//lib/everest/phase_rotation",
     ],
     impls = IMPLS,
     srcs = glob(

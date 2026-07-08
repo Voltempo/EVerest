@@ -77,3 +77,5 @@ target_link_libraries(${CHARGER_TEST_TARGET_NAME} PRIVATE
 
 add_test(${CHARGER_TEST_TARGET_NAME} ${CHARGER_TEST_TARGET_NAME})
 ev_register_test_target(${CHARGER_TEST_TARGET_NAME})
+
+# Phase rotation is now covered by lib/everest/phase_rotation/tests/phase_rotation_utils_test.cpp
