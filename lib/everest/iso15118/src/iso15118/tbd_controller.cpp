@@ -140,6 +140,12 @@ void TbdController::loop() {
 // The caller of this function needs to provide a non-blocking, keepalive fd.
 // ConnectionPlain::read() depends on the socket being non-blocking
 bool TbdController::start_session(int connected_fd) {
+    const auto skip_app_protocol_negotiation{false};
+    return start_session(connected_fd, skip_app_protocol_negotiation);
+}
+
+// The caller has already negotiated supported app protocol and can skip the sap process here
+bool TbdController::start_session(int connected_fd, bool skip_app_protocol_negotiation) {
     if (driver_running.exchange(true)) {
         logf_error("Another driver (loop/start_session) is already running; refusing concurrent entry");
         return false;
@@ -164,7 +170,7 @@ bool TbdController::start_session(int connected_fd) {
 
     auto connection = std::make_unique<io::ConnectionPlain>(poll_manager, connected_fd);
     session = std::make_unique<Session>(std::move(connection), d20::SessionConfig(*evse_setup.handle()), callbacks,
-                                        pause_ctx);
+                                        pause_ctx, skip_app_protocol_negotiation);
     shutdown_active.store(false);
     shutdown_signaled = false;
 

@@ -51,6 +51,7 @@ public:
     // Mutually exclusive with the other driver; see the class note. Refuses (logs and returns false) if the other
     // driver is already running.
     bool start_session(int connected_fd);
+    bool start_session(int connected_fd, bool skip_app_protocol_negotiation);
     void tick();
 
     bool has_active_session() const {
