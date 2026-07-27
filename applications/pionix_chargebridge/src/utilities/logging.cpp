@@ -92,22 +92,35 @@ public:
 private:
     void publish_line() {
         if (m_buffer.empty()) {
-            m_buffer.clear();
             return;
         }
 
-        if (!m_buffer.empty() && m_buffer.back() == '\n') {
+        if (m_buffer.back() == '\n') {
             m_buffer.pop_back();
         }
 
-        if (!m_buffer.empty()) {
-            auto sink = current_print_error_sink();
-            if (sink) {
-                sink(m_device, std::move(m_buffer));
-            }
+        // Take the line out of the buffer before publishing it: if the sink throws, the line is
+        // dropped once instead of being retried (and throwing again) on every later reset().
+        auto line = std::move(m_buffer);
+        m_buffer.clear();
+
+        if (line.empty()) {
+            return;
         }
 
-        m_buffer.clear();
+        auto sink = current_print_error_sink();
+        if (sink) {
+            sink(m_device, std::move(line));
+            return;
+        }
+
+        // The sink can be cleared between print_error()'s sample and this flush - status_ui::stop()
+        // does exactly that while the manager threads are still logging, which is where the shutdown
+        // diagnostics live. The line is already fully formatted (prefix included), so write it where
+        // print_error() would have written it instead of dropping it. This cannot double-print: in
+        // log/off mode no sink is ever installed, so print_error() never routes through this capture
+        // buffer in the first place.
+        std::cout << line << std::endl;
     }
 
     static constexpr std::size_t k_print_error_max_length = 2048;
@@ -163,6 +176,9 @@ inline std::ostream& capture_print_error(std::string const& device, std::string 
 
     auto const prefix = print_error_prefix_plain(device, unit, status);
     capture_buffer.reset(device, prefix);
+    // Stream error state is sticky: one failed line (e.g. a sink that threw, which the stream turns
+    // into badbit) would silence this thread for the rest of its life. Every call starts a new line.
+    capture_stream.clear();
     return capture_stream;
 }
 
@@ -171,6 +187,8 @@ inline std::ostream& capture_print_info(std::string const& device, std::string c
     thread_local std::ostream capture_stream(&capture_buffer);
 
     capture_buffer.reset(device, print_info_prefix_plain(device, unit));
+    // See capture_print_error(): clear any sticky error state from a previous line.
+    capture_stream.clear();
     return capture_stream;
 }
 
