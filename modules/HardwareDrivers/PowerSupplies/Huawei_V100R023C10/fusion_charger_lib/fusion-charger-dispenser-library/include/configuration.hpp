@@ -27,7 +27,7 @@ struct DispenserConfig {
     std::uint16_t charging_connector_count;
     std::string esn;
 
-    std::chrono::milliseconds modbus_timeout_ms = std::chrono::seconds(60);
+    std::chrono::milliseconds modbus_timeout_ms = std::chrono::seconds(10);
 
     bool send_secure_goose = true;        // if set to true send secured goose frames,
                                           // if false only send unsecured frames
