@@ -52,6 +52,8 @@ mode parse_args(int argc, char* argv[], std::vector<std::string>& config_files,
         std::cout << "--status-message-lines=10\n"
                      "                    terminal message panel height, maximum is 1000\n"
                      "                    shows latest N non-success messages below dashboard\n"
+                     "                    the panel never takes more than half of the terminal height, so the\n"
+                     "                    dashboard stays visible; the panel scrolls back over 1000 messages\n"
                      "                    0 is clamped to 1: terminal mode captures all diagnostics, so the\n"
                      "                    panel cannot be hidden; use --status-output=log for plain log output\n"
                      "                    ignored in log/off modes\n";

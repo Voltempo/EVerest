@@ -23,6 +23,7 @@
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/table.hpp>
 #include <ftxui/screen/box.hpp>
+#include <ftxui/screen/terminal.hpp>
 
 namespace {
 
@@ -804,10 +805,23 @@ void status_ui::run_terminal_loop() {
 
     // The message panel is always present (status_message_lines is clamped to >= 1 in terminal mode)
     // so no diagnostic can end up invisible; it can still be shrunk by dragging its border.
-    m_msg_split_size = std::max(3, static_cast<int>(m_options.status_message_lines) + 2);
+    constexpr int k_msg_panel_min = 3; // border + one message line
+    m_msg_split_size = std::max(k_msg_panel_min, static_cast<int>(m_options.status_message_lines) + 2);
     split = ResizableSplitBottom(Scroller(messages, /*stick_to_bottom=*/true), split, &m_msg_split_size);
 
+    // ftxui's resizable split does not bound the panel it is given, so --status-message-lines=1000
+    // (the documented maximum) leaves the dashboard zero rows - and so does dragging the border to the
+    // top of the screen. Keep the dashboard at least half of the terminal. Re-evaluated every frame so
+    // terminal resizes stay inside the same bound; the message panel scrolls, so a value larger than
+    // the visible half only hides the dashboard instead of showing more (use --status-output=log for
+    // full-screen diagnostics). The 1000-entry scrollback buffer is unaffected.
+    auto clamp_msg_split = [&] {
+        const int max_size = std::max(k_msg_panel_min, ftxui::Terminal::Size().dimy / 2);
+        m_msg_split_size = std::clamp(m_msg_split_size, k_msg_panel_min, max_size);
+    };
+
     auto app = Renderer(split, [&] {
+        clamp_msg_split();
         return vbox({
             text("PIONIX ChargeBridge") | bold | hcenter,
             text("[ click/↑↓ select   wheel scroll   drag borders to resize   n set name   f filter log   q "
@@ -889,9 +903,23 @@ void status_ui::run_terminal_loop() {
         }
     }
 
+    // The screen is gone and the terminal is restored, so send diagnostics back to stdout right away
+    // instead of letting them pile up in a buffer nobody paints. stop() clears the sink as well;
+    // clearing it twice is harmless.
+    utilities::clear_print_error_sink();
+
     // If the loop exited because the user quit (rather than stop() being called), notify the app.
-    if (m_running.load(std::memory_order_acquire) && m_quit_handler) {
-        m_quit_handler();
+    if (m_running.load(std::memory_order_acquire)) {
+        if (m_quit_handler) {
+            m_quit_handler();
+        } else {
+            // Nothing asked the application to shut down, so q/Escape/Ctrl-C just removed its only
+            // user interface. Say so on stdout, which is usable again at this point.
+            utilities::print_error("", "STATUS UI", -1)
+                << "Terminal UI closed but no quit handler was set; the application keeps running "
+                   "without a dashboard."
+                << std::endl;
+        }
     }
 }
 
