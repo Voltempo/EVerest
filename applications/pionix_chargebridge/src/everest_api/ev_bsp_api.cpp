@@ -269,7 +269,8 @@ void ev_bsp_api::dispatch(std::string const& operation, std::string const& paylo
     } else if (operation == "heartbeat") {
         receive_heartbeat(payload);
     } else {
-        std::cerr << "ev_bsp_api: RECEIVE invalid operation: " << operation << std::endl;
+        utilities::print_error(m_cb_identifier, "EV_BSP/EVEREST", -1)
+            << "RECEIVE invalid operation: " << operation << std::endl;
     }
 }
 
@@ -309,7 +310,8 @@ void ev_bsp_api::receive_set_cp_state(std::string const& payload) {
         host_status.ev_set_cp_state = evcpstate_to_cpstate(cp);
         tx(host_status);
     } else {
-        std::cerr << "ev_bsp_api::receive_set_cp_state: payload invalid -> " << payload << std::endl;
+        utilities::print_error(m_cb_identifier, "EV_BSP/EVEREST", -1)
+            << "receive_set_cp_state: payload invalid -> " << payload << std::endl;
     }
 }
 
@@ -320,7 +322,8 @@ void ev_bsp_api::receive_allow_power_on(std::string const& payload) {
         host_status.allow_power_on = static_cast<std::uint8_t>(on);
         tx(host_status);
     } else {
-        std::cerr << "ev_bsp_api::receive_allow_power_on: payload invalid -> " << payload << std::endl;
+        utilities::print_error(m_cb_identifier, "EV_BSP/EVEREST", -1)
+            << "receive_allow_power_on: payload invalid -> " << payload << std::endl;
     }
 }
 
@@ -331,7 +334,8 @@ void ev_bsp_api::receive_diode_fail(std::string const& payload) {
         host_status.ev_set_diodefault = static_cast<std::uint8_t>(on);
         tx(host_status);
     } else {
-        std::cerr << "ev_bsp_api::receive_diode_fail: payload invalid -> " << payload << std::endl;
+        utilities::print_error(m_cb_identifier, "EV_BSP/EVEREST", -1)
+            << "receive_diode_fail: payload invalid -> " << payload << std::endl;
     }
 }
 

@@ -142,7 +142,8 @@ void evse_bsp_api::dispatch(std::string const& operation, std::string const& pay
     } else if (operation == "heartbeat") {
         receive_heartbeat(payload);
     } else {
-        std::cerr << "evse_bsp: RECEIVE invalid operation: " << operation << std::endl;
+        utilities::print_error(m_cb_identifier, "EVSE/EVEREST", -1)
+            << "RECEIVE invalid operation: " << operation << std::endl;
     }
 }
 
@@ -388,7 +389,8 @@ void evse_bsp_api::receive_enable(std::string const& payload) {
         handle_event_cp(cb_status.cp_state);
         handle_event_relay(cb_status.relay_state);
     } else {
-        std::cerr << "evse_bsp_api::receive_enabled: payload invalid -> " << payload << std::endl;
+        utilities::print_error(m_cb_identifier, "EVSE/EVEREST", -1)
+            << "receive_enabled: payload invalid -> " << payload << std::endl;
     }
 }
 
@@ -398,7 +400,8 @@ void evse_bsp_api::receive_pwm_on(std::string const& payload) {
         host_status.pwm_duty_cycle = pwm * 100;
         tx(host_status);
     } else {
-        std::cerr << "evse_bsp_api::receive_pwm_on: payload invalid -> " << payload << std::endl;
+        utilities::print_error(m_cb_identifier, "EVSE/EVEREST", -1)
+            << "receive_pwm_on: payload invalid -> " << payload << std::endl;
     }
 }
 
@@ -418,7 +421,8 @@ void evse_bsp_api::receive_allow_power_on(std::string const& payload) {
         host_status.allow_power_on = obj.allow_power_on;
         tx(host_status);
     } else {
-        std::cerr << "evse_bsp_api::receive_allow_power_on: payload invalid -> " << payload << std::endl;
+        utilities::print_error(m_cb_identifier, "EVSE/EVEREST", -1)
+            << "receive_allow_power_on: payload invalid -> " << payload << std::endl;
     }
 }
 

@@ -30,7 +30,8 @@ bool is_cb_match(std::string const& board_type, discovery_device_type discrimina
 
 const std::string discovery::discovery_id = "_chargebridge._udp.local";
 
-discovery::discovery(discovery_device_type type) : m_type(type) {
+discovery::discovery(discovery_device_type type, std::string instance_name) :
+    m_type(type), m_instance_name(std::move(instance_name)) {
     using namespace std::chrono_literals;
     m_timer.set_timeout(1s);
 
@@ -39,11 +40,13 @@ discovery::discovery(discovery_device_type type) : m_type(type) {
     }
 }
 
-discovery::discovery(discovery_device_type type, std::set<std::string> const& interfaces, bool excluding) :
-    m_type(type) {
+discovery::discovery(discovery_device_type type, std::set<std::string> const& interfaces, bool excluding,
+                     std::string instance_name) :
+    m_type(type), m_instance_name(std::move(instance_name)) {
     using namespace std::chrono_literals;
     m_timer.set_timeout(1s);
 
+    std::string used_interfaces;
     for (auto const& item : everest::lib::io::socket::get_all_interfaces()) {
         if (not interfaces.empty()) {
             if (interfaces.count(item.name) == 1 and excluding) {
@@ -53,8 +56,18 @@ discovery::discovery(discovery_device_type type, std::set<std::string> const& in
                 continue;
             }
         }
-        std::cout << " using interface: " << item.name << std::endl;
+        if (not used_interfaces.empty()) {
+            used_interfaces += ", ";
+        }
+        used_interfaces += item.name;
         add_client(item.name);
+    }
+
+    // Discovery is restarted on every retry, so report the selected interfaces as a single line and
+    // through print_info (not raw std::cout): in terminal mode it must land in the UI's message panel
+    // instead of being painted over by the ftxui redraw.
+    if (not used_interfaces.empty()) {
+        utilities::print_info(m_instance_name, "DISCOVERY") << "using interfaces: " << used_interfaces << std::endl;
     }
 }
 

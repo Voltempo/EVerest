@@ -171,8 +171,8 @@ void heartbeat_service::handle_udp_rx(everest::lib::io::udp::udp_payload const& 
         m_telemetry.vdd_3v3_mV = data.data.vdd_3v3;
         m_have_telemetry = true;
     } else {
-        std::cout << "INVALID DATA SIZE in UDP RX of HEARTBEAT: " << payload.size() << " vs " << sizeof(data)
-                  << std::endl;
+        utilities::print_error(m_identifier, "HEARTBEAT/UDP", -1)
+            << "INVALID DATA SIZE in UDP RX of HEARTBEAT: " << payload.size() << " vs " << sizeof(data) << std::endl;
     }
 }
 

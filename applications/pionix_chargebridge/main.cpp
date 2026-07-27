@@ -155,8 +155,12 @@ mode parse_args(int argc, char* argv[], std::vector<std::string>& config_files,
 }
 
 std::atomic<bool> g_run_application(true);
+std::atomic<int> g_shutdown_signal(0);
 void signal_handler(int signum) {
-    std::cout << "\nSignal " << signum << " received. Initiating graceful shutdown." << std::endl;
+    // Async-signal-safe work only: no stream output from here. Writing to std::cout is not
+    // async-signal-safe and would also land in the middle of the terminal dashboard's screen. The
+    // signal number is reported by main() once the event loop and the UI are gone.
+    g_shutdown_signal.store(signum);
     g_run_application = false;
 }
 
@@ -267,5 +271,10 @@ int main(int argc, char* argv[]) {
     ev_handler.run(g_run_application);
     cb_handler.clear();
     ui.stop();
+    // Reported here, not from the signal handler (see signal_handler): at this point the terminal UI
+    // has restored the screen, so plain stdout is safe again.
+    if (auto const signum = g_shutdown_signal.load(); signum != 0) {
+        std::cout << "\nSignal " << signum << " received. Graceful shutdown completed." << std::endl;
+    }
     return EXIT_SUCCESS;
 }

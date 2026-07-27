@@ -10,6 +10,7 @@
 #include <functional>
 #include <memory>
 #include <set>
+#include <string>
 
 namespace charge_bridge {
 
@@ -22,8 +23,11 @@ class discovery : public everest::lib::io::event::fd_event_register_interface {
 public:
     using discovery_cb = std::function<void(everest::lib::io::mdns::mDNS_discovery const&)>;
 
-    discovery(discovery_device_type type);
-    discovery(discovery_device_type type, std::set<std::string> const& interfaces, bool excluding);
+    // instance_name is the charge_bridge name this discovery belongs to; it is only used to attribute
+    // log lines to the right instance (and row in the terminal UI).
+    discovery(discovery_device_type type, std::string instance_name = {});
+    discovery(discovery_device_type type, std::set<std::string> const& interfaces, bool excluding,
+              std::string instance_name = {});
 
     bool register_events(everest::lib::io::event::fd_event_handler& handler) override;
     bool unregister_events(everest::lib::io::event::fd_event_handler& handler) override;
@@ -39,6 +43,7 @@ private:
     discovery_cb m_on_discover;
     everest::lib::io::mdns::mDNS_registry m_registry;
     discovery_device_type m_type;
+    std::string m_instance_name;
     static const std::string discovery_id;
 };
 

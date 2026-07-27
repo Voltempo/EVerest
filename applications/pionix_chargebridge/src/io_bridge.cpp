@@ -159,17 +159,17 @@ void io_bridge::dispatch(everest::lib::io::mqtt::mqtt_client::message const& dat
     try {
         value = stous(payload);
     } catch (...) {
-        std::cout << "INVALID DATA on MQTT for GPIO DATA" << std::endl;
+        utilities::print_error(m_identifier, "IO/MQTT", -1) << "INVALID DATA on MQTT for GPIO DATA" << std::endl;
         return;
     }
     try {
         id = std::stoi(operation);
     } catch (...) {
-        std::cout << "INVALID DATA on MQTT for GPIO ID" << std::endl;
+        utilities::print_error(m_identifier, "IO/MQTT", -1) << "INVALID DATA on MQTT for GPIO ID" << std::endl;
         return;
     }
     if (id < 0 or id >= CB_NUMBER_OF_GPIOS) {
-        std::cout << "INVALID GPIO ID" << std::endl;
+        utilities::print_error(m_identifier, "IO/MQTT", -1) << "INVALID GPIO ID" << std::endl;
         return;
     }
 
@@ -186,22 +186,24 @@ void io_bridge::dispatch_ws28(everest::lib::io::mqtt::mqtt_client::message const
     try {
         gpio_id = std::stoi(operation);
     } catch (...) {
-        std::cout << "INVALID GPIO ID on MQTT for WS28 DATA" << std::endl;
+        utilities::print_error(m_identifier, "IO/MQTT", -1) << "INVALID GPIO ID on MQTT for WS28 DATA" << std::endl;
         return;
     }
     if (gpio_id < 0 or gpio_id >= CB_NUMBER_OF_GPIOS) {
-        std::cout << "INVALID GPIO ID for WS28 DATA" << std::endl;
+        utilities::print_error(m_identifier, "IO/MQTT", -1) << "INVALID GPIO ID for WS28 DATA" << std::endl;
         return;
     }
 
     // Payload is a hex string, 6 chars per LED ("RRGGBB"), no separators.
     if (payload.size() % 6 != 0) {
-        std::cout << "INVALID WS28 PAYLOAD (length must be a multiple of 6 hex chars)" << std::endl;
+        utilities::print_error(m_identifier, "IO/MQTT", -1)
+            << "INVALID WS28 PAYLOAD (length must be a multiple of 6 hex chars)" << std::endl;
         return;
     }
     auto const led_count = payload.size() / 6;
     if (led_count > CB_WS28_MAX_LEDS) {
-        std::cout << "WS28 PAYLOAD too long: " << led_count << " > " << CB_WS28_MAX_LEDS << std::endl;
+        utilities::print_error(m_identifier, "IO/MQTT", -1)
+            << "WS28 PAYLOAD too long: " << led_count << " > " << CB_WS28_MAX_LEDS << std::endl;
         return;
     }
 
@@ -223,7 +225,8 @@ void io_bridge::dispatch_ws28(everest::lib::io::mqtt::mqtt_client::message const
         auto hi = hex_nibble(payload[2 * i]);
         auto lo = hex_nibble(payload[2 * i + 1]);
         if (hi < 0 or lo < 0) {
-            std::cout << "INVALID WS28 PAYLOAD (non-hex character)" << std::endl;
+            utilities::print_error(m_identifier, "IO/MQTT", -1)
+                << "INVALID WS28 PAYLOAD (non-hex character)" << std::endl;
             return;
         }
         m_ws28_message.data.rgb[i] = static_cast<uint8_t>((hi << 4) | lo);
@@ -243,11 +246,11 @@ void io_bridge::dispatch_ws28_anim(everest::lib::io::mqtt::mqtt_client::message 
     try {
         gpio_id = std::stoi(operation);
     } catch (...) {
-        std::cout << "INVALID GPIO ID on MQTT for WS28 ANIM" << std::endl;
+        utilities::print_error(m_identifier, "IO/MQTT", -1) << "INVALID GPIO ID on MQTT for WS28 ANIM" << std::endl;
         return;
     }
     if (gpio_id < 0 or gpio_id >= CB_NUMBER_OF_GPIOS) {
-        std::cout << "INVALID GPIO ID for WS28 ANIM" << std::endl;
+        utilities::print_error(m_identifier, "IO/MQTT", -1) << "INVALID GPIO ID for WS28 ANIM" << std::endl;
         return;
     }
 
@@ -278,7 +281,7 @@ void io_bridge::dispatch_ws28_anim(everest::lib::io::mqtt::mqtt_client::message 
     try {
         j = nlohmann::json::parse(payload);
     } catch (...) {
-        std::cout << "INVALID WS28 ANIM PAYLOAD (not JSON)" << std::endl;
+        utilities::print_error(m_identifier, "IO/MQTT", -1) << "INVALID WS28 ANIM PAYLOAD (not JSON)" << std::endl;
         return;
     }
 
@@ -290,14 +293,16 @@ void io_bridge::dispatch_ws28_anim(everest::lib::io::mqtt::mqtt_client::message 
             auto name = s.get<std::string>();
             auto it = std::find(style_names.begin(), style_names.end(), name);
             if (it == style_names.end()) {
-                std::cout << "INVALID WS28 ANIM style name: " << name << std::endl;
+                utilities::print_error(m_identifier, "IO/MQTT", -1)
+                    << "INVALID WS28 ANIM style name: " << name << std::endl;
                 return;
             }
             style = static_cast<uint8_t>(std::distance(style_names.begin(), it));
         } else if (s.is_number_integer()) {
             auto v = s.get<int>();
             if (v < 0 or v >= static_cast<int>(style_names.size())) {
-                std::cout << "INVALID WS28 ANIM style index: " << v << std::endl;
+                utilities::print_error(m_identifier, "IO/MQTT", -1)
+                    << "INVALID WS28 ANIM style index: " << v << std::endl;
                 return;
             }
             style = static_cast<uint8_t>(v);
@@ -324,13 +329,15 @@ void io_bridge::dispatch_ws28_anim(everest::lib::io::mqtt::mqtt_client::message 
     d.r2 = d.g2 = d.b2 = 0;
     if (j.contains("color") and j.at("color").is_string()) {
         if (not parse_color(j.at("color").get<std::string>(), d.r1, d.g1, d.b1)) {
-            std::cout << "INVALID WS28 ANIM color (expected RRGGBB hex)" << std::endl;
+            utilities::print_error(m_identifier, "IO/MQTT", -1)
+                << "INVALID WS28 ANIM color (expected RRGGBB hex)" << std::endl;
             return;
         }
     }
     if (j.contains("color2") and j.at("color2").is_string()) {
         if (not parse_color(j.at("color2").get<std::string>(), d.r2, d.g2, d.b2)) {
-            std::cout << "INVALID WS28 ANIM color2 (expected RRGGBB hex)" << std::endl;
+            utilities::print_error(m_identifier, "IO/MQTT", -1)
+                << "INVALID WS28 ANIM color2 (expected RRGGBB hex)" << std::endl;
             return;
         }
     }
@@ -445,19 +452,22 @@ void io_bridge::handle_udp_rx(everest::lib::io::udp::udp_payload const& payload)
     auto const fixed_prefix = sizeof(data) - sizeof(data.data.telemetry.entries);
     auto const size = payload.size();
     if (size < fixed_prefix || size > sizeof(data)) {
-        std::cout << "INVALID DATA SIZE in UDP RX of IO: " << size << " (expected " << fixed_prefix << ".."
-                  << sizeof(data) << ")" << std::endl;
+        utilities::print_error(m_identifier, "IO/UDP", -1)
+            << "INVALID DATA SIZE in UDP RX of IO: " << size << " (expected " << fixed_prefix << ".." << sizeof(data)
+            << ")" << std::endl;
         return;
     }
     std::memcpy(&data, payload.buffer.data(), size);
     if (data.type != CbStructType::CST_CbToHost_Io) {
-        std::cout << "UNEXPECTED packet type in UDP RX of IO: " << static_cast<int>(data.type) << std::endl;
+        utilities::print_error(m_identifier, "IO/UDP", -1)
+            << "UNEXPECTED packet type in UDP RX of IO: " << static_cast<int>(data.type) << std::endl;
         return;
     }
     auto const entry_count = data.data.telemetry.number_of_entries;
     if (entry_count > CB_TELEMETRY_MAX_ENTRIES || size != fixed_prefix + entry_count * entry_size) {
-        std::cout << "INVALID TELEMETRY in UDP RX of IO: entries=" << static_cast<int>(entry_count) << " size=" << size
-                  << std::endl;
+        utilities::print_error(m_identifier, "IO/UDP", -1)
+            << "INVALID TELEMETRY in UDP RX of IO: entries=" << static_cast<int>(entry_count) << " size=" << size
+            << std::endl;
         return;
     }
 

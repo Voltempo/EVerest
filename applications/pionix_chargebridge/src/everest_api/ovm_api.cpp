@@ -88,7 +88,8 @@ void ovm_api::dispatch(std::string const& operation, std::string const& payload)
     } else if (operation == "heartbeat") {
         receive_heartbeat(payload);
     } else {
-        std::cerr << "ovm_api: RECEIVE invalid operation: " << operation << std::endl;
+        utilities::print_error(m_cb_identifier, "OVM/EVEREST", -1)
+            << "RECEIVE invalid operation: " << operation << std::endl;
     }
 }
 
@@ -132,7 +133,8 @@ void ovm_api::receive_set_limits(std::string const& payload) {
         host_status.ovm_limit_error_mV = static_cast<std::uint32_t>(m_limits.error_limit_V * V_to_mV_factor);
         tx(host_status);
     } else {
-        std::cerr << "ovm_api::receive_set_limits: payload invalid -> " << payload << std::endl;
+        utilities::print_error(m_cb_identifier, "OVM/EVEREST", -1)
+            << "receive_set_limits: payload invalid -> " << payload << std::endl;
     }
 }
 

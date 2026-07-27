@@ -37,10 +37,8 @@ std::pair<bool, std::set<std::string>> make_interface_list(std::string const& st
     }
     auto exclude = raw.substr(0, 1) == "!";
     auto items = utilities::csv_to_set(raw.substr(exclude ? 1 : 0));
-    for (auto const& elem : items) {
-        std::cout << elem << ", ";
-    }
-    std::cout << std::endl;
+    // No logging here: this has no instance context, and the configured list is already reported by
+    // print_charge_bridge_config ("* remote:") and the interfaces actually used by discovery.
     return {exclude, items};
 }
 
@@ -78,7 +76,7 @@ void charge_bridge::init_discovery(discovery_device_type type, std::set<std::str
     using namespace everest::lib::util;
     utilities::print_error(m_config.cb_name, "DISCOVERY", -1) << "Discovery pending" << std::endl;
 
-    m_discovery = std::make_unique<discovery>(type, interfaces, excluding);
+    m_discovery = std::make_unique<discovery>(type, interfaces, excluding, m_config.cb_name);
     m_discovery->set_discovery_callback(bind_obj(&charge_bridge::handle_discovery, this));
     set_discovery_pending(true);
 }
@@ -494,7 +492,8 @@ charge_bridge::~charge_bridge() {
 void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, std::atomic_bool const& run,
                            bool force_update) {
     if (m_manager.joinable()) {
-        std::cerr << "WARN: charge_bridge::manage called while manager thread is already running" << std::endl;
+        utilities::print_error(m_config.cb_name, "MANAGER", -1)
+            << "manage() called while manager thread is already running" << std::endl;
         return;
     }
 
@@ -772,7 +771,8 @@ bool charge_bridge::update_firmware(bool force) {
     }
     auto result = updater.upload_fw() && updater.check_connection();
     if (not result) {
-        std::cout << "Error: could not install correct firmware version" << std::endl;
+        utilities::print_error(m_config.cb_name, "FIRMWARE", 1)
+            << "Could not install correct firmware version" << std::endl;
     }
     return result;
 }
