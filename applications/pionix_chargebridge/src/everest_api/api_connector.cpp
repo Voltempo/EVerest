@@ -33,7 +33,10 @@ api_connector::api_connector(everest_api_config const& config, std::string const
     if (m_evse_bsp_enabled && m_ev_bsp_enabled) {
         throw std::runtime_error("Configuration error: Cannot enable EV and EVSE BSP at the same time");
     }
-    utilities::print_error(m_cb_identifier, "BSP/CB", 0) << "ChargeBridge connected." << std::endl;
+
+    // The ChargeBridge connection is reported from handle_cb_connection_state(), which runs the
+    // initial check on the first sync tick. Announcing it here would claim a connection before
+    // a single heartbeat was seen.
 
     if (m_evse_bsp_enabled) {
         api_topics.setup(config.evse.module_id, "evse_board_support", 1);
