@@ -97,7 +97,9 @@ public:
 private:
     std::future<bool> start_internal_runtime();
     void create_internal_runtime();
+    void create_internal_runtime_eagerly();
     void cleanup_internal_runtime();
+    void connect_internal_runtime_endpoints();
     void disconnect_internal_runtime_endpoints();
     bool unregister_internal_runtime_events(everest::lib::io::event::fd_event_handler& handler);
     std::future<bool> stop_internal_runtime();

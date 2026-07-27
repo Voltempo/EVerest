@@ -264,25 +264,25 @@ void charge_bridge::set_runtime_connection_status(charge_bridge_status& status, 
 std::future<bool> charge_bridge::start_internal_runtime() {
     auto promise = std::make_shared<std::promise<bool>>();
     auto result = promise->get_future();
-    auto preserve_runtime_objects =
-        m_can_0_client || m_pty_1 || m_pty_2 || m_pty_3 || m_bsp || m_plc || m_io || m_heartbeat;
 
     if (not m_event_handler) {
         promise->set_value(false);
         return result;
     }
 
-    m_event_handler->add_action([this, promise = std::move(promise), preserve_runtime_objects]() mutable {
+    m_event_handler->add_action([this, promise = std::move(promise)]() mutable {
         try {
+            // Construction is normally done eagerly at startup (see create_internal_runtime_eagerly),
+            // so this only retries bridges whose local devices could not be created back then.
             create_internal_runtime();
+            connect_internal_runtime_endpoints();
             auto runtime_registered = register_internal_events(*m_event_handler);
             if (not runtime_registered) {
                 unregister_internal_runtime_events(*m_event_handler);
-                if (preserve_runtime_objects) {
-                    disconnect_internal_runtime_endpoints();
-                } else {
-                    cleanup_internal_runtime();
-                }
+                // Recycle the CB side only. The bridge objects own host-local devices (pty + symlink,
+                // vcan, tap) that EVerest modules are configured against, so a failure on the
+                // ChargeBridge side must never make those devices disappear.
+                disconnect_internal_runtime_endpoints();
                 promise->set_value(false);
                 m_cb_status.notify_one();
                 return;
@@ -292,11 +292,7 @@ std::future<bool> charge_bridge::start_internal_runtime() {
             m_cb_status.notify_one();
         } catch (...) {
             unregister_internal_runtime_events(*m_event_handler);
-            if (preserve_runtime_objects) {
-                disconnect_internal_runtime_endpoints();
-            } else {
-                cleanup_internal_runtime();
-            }
+            disconnect_internal_runtime_endpoints();
             promise->set_exception(std::current_exception());
             m_cb_status.notify_one();
         }
@@ -305,57 +301,35 @@ std::future<bool> charge_bridge::start_internal_runtime() {
     return result;
 }
 
+// Constructs the bridge objects and with them the host-local devices they own: the serial ptys and
+// their symlinks, the vcan netlink device and the PLC tap device. None of this requires the
+// ChargeBridge to be reachable; the CB-side sockets created along the way are dropped by the caller
+// and (re)established by connect_internal_runtime_endpoints() once the CB answers. Objects that
+// already exist are left untouched, so this is a no-op after a successful eager creation and a
+// retry for whatever failed. Must not run concurrently with the event loop touching the bridges.
 void charge_bridge::create_internal_runtime() {
-    if (m_config.can0.has_value()) {
-        if (not m_can_0_client) {
-            m_can_0_client = std::make_unique<can_bridge>(m_config.can0.value(), m_ready_notify);
-        } else {
-            m_can_0_client->connect_cb_endpoint(m_config.can0->cb_remote);
-        }
+    if (m_config.can0.has_value() and not m_can_0_client) {
+        m_can_0_client = std::make_unique<can_bridge>(m_config.can0.value(), m_ready_notify);
     }
-    if (m_config.serial1.has_value()) {
-        if (not m_pty_1) {
-            m_pty_1 = std::make_unique<serial_bridge>(m_config.serial1.value(), m_ready_notify);
-        } else {
-            m_pty_1->connect_cb_endpoint(m_config.serial1->cb_remote);
-        }
+    if (m_config.serial1.has_value() and not m_pty_1) {
+        m_pty_1 = std::make_unique<serial_bridge>(m_config.serial1.value(), m_ready_notify);
     }
-    if (m_config.serial2.has_value()) {
-        if (not m_pty_2) {
-            m_pty_2 = std::make_unique<serial_bridge>(m_config.serial2.value(), m_ready_notify);
-        } else {
-            m_pty_2->connect_cb_endpoint(m_config.serial2->cb_remote);
-        }
+    if (m_config.serial2.has_value() and not m_pty_2) {
+        m_pty_2 = std::make_unique<serial_bridge>(m_config.serial2.value(), m_ready_notify);
     }
-    if (m_config.serial3.has_value()) {
-        if (not m_pty_3) {
-            m_pty_3 = std::make_unique<serial_bridge>(m_config.serial3.value(), m_ready_notify);
-        } else {
-            m_pty_3->connect_cb_endpoint(m_config.serial3->cb_remote);
-        }
+    if (m_config.serial3.has_value() and not m_pty_3) {
+        m_pty_3 = std::make_unique<serial_bridge>(m_config.serial3.value(), m_ready_notify);
     }
-    if (m_config.plc.has_value()) {
-        if (not m_plc) {
-            m_plc = std::make_unique<plc_bridge>(m_config.plc.value(), m_ready_notify);
-        } else {
-            m_plc->connect_cb_endpoint(m_config.plc->cb_remote);
-        }
+    if (m_config.plc.has_value() and not m_plc) {
+        m_plc = std::make_unique<plc_bridge>(m_config.plc.value(), m_ready_notify);
     }
-    if (m_config.bsp.has_value()) {
-        if (not m_bsp) {
-            m_bsp = std::make_unique<bsp_bridge>(m_config.bsp.value(), m_ready_notify);
-        } else {
-            m_bsp->connect_cb_endpoint(m_config.bsp->cb_remote);
-        }
+    if (m_config.bsp.has_value() and not m_bsp) {
+        m_bsp = std::make_unique<bsp_bridge>(m_config.bsp.value(), m_ready_notify);
     }
-    if (m_config.io.has_value()) {
-        if (not m_io) {
-            m_io = std::make_unique<io_bridge>(m_config.io.value(), m_ready_notify);
-        } else {
-            m_io->connect_cb_endpoint(m_config.io->cb_remote);
-        }
+    if (m_config.io.has_value() and not m_io) {
+        m_io = std::make_unique<io_bridge>(m_config.io.value(), m_ready_notify);
     }
-    if (m_config.heartbeat.has_value()) {
+    if (m_config.heartbeat.has_value() and not m_heartbeat) {
         auto heartbeat_cb = [this](bool connected) {
             {
                 auto handle = m_cb_status.handle();
@@ -365,12 +339,28 @@ void charge_bridge::create_internal_runtime() {
             m_cb_status.notify_one();
         };
 
-        if (not m_heartbeat) {
-            m_heartbeat = std::make_unique<heartbeat_service>(m_config.heartbeat.value(), heartbeat_cb, m_ready_notify);
-        } else {
-            m_heartbeat->connect_cb_endpoint(m_config.heartbeat->cb_remote);
-        }
+        m_heartbeat = std::make_unique<heartbeat_service>(m_config.heartbeat.value(), heartbeat_cb, m_ready_notify);
     }
+}
+
+// Creates the bridge objects at startup, before any connection to the ChargeBridge exists, so the
+// host-local devices (pty symlinks, vcan, tap) are present from process start on: EVerest modules
+// are configured against those device paths and open them during their own startup, which must work
+// with the ChargeBridge unpowered or not yet discovered. A construction failure is reported but not
+// fatal; start_internal_runtime() retries it on every connection attempt.
+// The CB-side sockets the constructors bring up are dropped right away: the remote may not be known
+// yet (mDNS) and connecting is the manager loop's business. That leaves the runtime in exactly the
+// same state as after stop_internal_runtime(), so first connect and reconnect share one code path.
+void charge_bridge::create_internal_runtime_eagerly() {
+    try {
+        create_internal_runtime();
+    } catch (std::exception const& e) {
+        utilities::print_error(m_config.cb_name, "RUNTIME", -1)
+            << "Failed to create local devices: " << e.what() << std::endl;
+    } catch (...) {
+        utilities::print_error(m_config.cb_name, "RUNTIME", -1) << "Failed to create local devices" << std::endl;
+    }
+    disconnect_internal_runtime_endpoints();
 }
 
 void charge_bridge::cleanup_internal_runtime() {
@@ -383,6 +373,35 @@ void charge_bridge::cleanup_internal_runtime() {
     m_plc.reset();
     m_io.reset();
     m_heartbeat.reset();
+}
+
+// (Re)connects the CB-side socket of every existing bridge to the current remote address (the
+// configured one, or the one mDNS discovery found). The host-local devices are not touched.
+void charge_bridge::connect_internal_runtime_endpoints() {
+    if (m_can_0_client and m_config.can0.has_value()) {
+        m_can_0_client->connect_cb_endpoint(m_config.can0->cb_remote);
+    }
+    if (m_pty_1 and m_config.serial1.has_value()) {
+        m_pty_1->connect_cb_endpoint(m_config.serial1->cb_remote);
+    }
+    if (m_pty_2 and m_config.serial2.has_value()) {
+        m_pty_2->connect_cb_endpoint(m_config.serial2->cb_remote);
+    }
+    if (m_pty_3 and m_config.serial3.has_value()) {
+        m_pty_3->connect_cb_endpoint(m_config.serial3->cb_remote);
+    }
+    if (m_bsp and m_config.bsp.has_value()) {
+        m_bsp->connect_cb_endpoint(m_config.bsp->cb_remote);
+    }
+    if (m_plc and m_config.plc.has_value()) {
+        m_plc->connect_cb_endpoint(m_config.plc->cb_remote);
+    }
+    if (m_io and m_config.io.has_value()) {
+        m_io->connect_cb_endpoint(m_config.io->cb_remote);
+    }
+    if (m_heartbeat and m_config.heartbeat.has_value()) {
+        m_heartbeat->connect_cb_endpoint(m_config.heartbeat->cb_remote);
+    }
 }
 
 void charge_bridge::disconnect_internal_runtime_endpoints() {
@@ -482,6 +501,11 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
     using namespace std::chrono_literals;
     m_event_handler = &handler;
     m_force_firmware_update = force_update;
+
+    // Bring up the host-local devices before anything else and independent of the ChargeBridge being
+    // reachable. Done on the calling thread: manage() runs before the event loop is started and the
+    // bridges are not registered with it yet, so there is nothing to race with.
+    create_internal_runtime_eagerly();
 
     m_event_handler->add_action([this]() {
         if (m_config.telemetry.has_value()) {
