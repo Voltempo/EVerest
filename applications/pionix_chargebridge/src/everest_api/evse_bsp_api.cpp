@@ -215,7 +215,11 @@ void evse_bsp_api::handle_event_relay(std::uint8_t relay) {
     }
 }
 
-void evse_bsp_api::handle_pp_type2(std::uint8_t data) {
+// 'republish' re-sends an already latched proximity fault (used when EVerest reconnected and
+// lost it). The latch itself is never reset from the outside: an out-of-range 'data' hits the
+// default case below, which neither raises nor clears, and would leave an active fault with a
+// dropped latch unclearable.
+void evse_bsp_api::handle_pp_type2(std::uint8_t data, bool republish) {
     API_BSP::Ampacity bc_ampacity;
     bool bc_ampacity_valid = true;
     switch (data) {
@@ -237,7 +241,7 @@ void evse_bsp_api::handle_pp_type2(std::uint8_t data) {
     case PpState_Type2_STATE_FAULT:
         // Raise error check state
         bc_ampacity_valid = false;
-        if (not m_pp_fault_raised) {
+        if (not m_pp_fault_raised or republish) {
             send_raise_error(API_BSP::ErrorEnum::MREC23ProximityFault, pp_fault_subtype_state,
                              "Proximity Pilot Fault State");
             m_pp_fault_raised = true;
@@ -386,8 +390,13 @@ void evse_bsp_api::handle_stop_button(std::uint8_t data) {
 
 void evse_bsp_api::receive_enable(std::string const& payload) {
     if (everest::lib::API::deserialize(payload, m_enabled)) {
-        handle_event_cp(cb_status.cp_state);
-        handle_event_relay(cb_status.relay_state);
+        // Re-derive the reported state from 'cb_status' only while a ChargeBridge is actually
+        // connected. Otherwise the snapshot is zero or stale and replaying it would report CP
+        // state A and clear MREC14PilotFault/DiodeFault for a device that is not there.
+        if (m_cb_connected) {
+            handle_event_cp(cb_status.cp_state);
+            handle_event_relay(cb_status.relay_state);
+        }
     } else {
         utilities::print_error(m_cb_identifier, "EVSE/EVEREST", -1)
             << "receive_enabled: payload invalid -> " << payload << std::endl;
@@ -534,13 +543,23 @@ void evse_bsp_api::handle_everest_connection_state() {
             send_capabilities();
             // A freshly (re)started EVerest lost every error raised before it came up, while the
             // MCU keeps its latched errors. Re-publish all currently active errors instead of
-            // assuming they are still known: all active safety flags (treating "nothing known
-            // before" as the previous state) plus an active proximity fault state.
-            // Raising an already active error is ignored by the EVerest error framework, so this
-            // is harmless if EVerest did not actually restart (e.g. a short heartbeat gap).
-            publish_error_flag_edges(0, cb_status.error_flags.raw);
-            m_pp_fault_raised = false;
-            handle_pp_type2(cb_status.pp_state_type2);
+            // assuming they are still known. Raising an already active error is ignored by the
+            // EVerest error framework, so this is harmless if EVerest did not actually restart
+            // (e.g. a short heartbeat gap).
+            if (m_cb_connected) {
+                // All active safety flags (treating "nothing known before" as the previous
+                // state) plus an active proximity fault state.
+                publish_error_flag_edges(0, cb_status.error_flags.raw);
+                handle_pp_type2(cb_status.pp_state_type2, true);
+            } else {
+                // Without a live ChargeBridge 'cb_status' is zero or a stale snapshot of a
+                // device that is gone (or has been replaced), so it must not be replayed: that
+                // would attribute errors to the wrong device and report the connector as
+                // available. The communication fault is edge triggered on the ChargeBridge
+                // connection and equally unknown to a restarted EVerest, so re-assert it here.
+                // The real state is published as soon as the ChargeBridge reports it again.
+                raise_comm_fault();
+            }
         } else {
             utilities::print_error(m_cb_identifier, "EVSE/EVEREST", 1) << "Waiting for EVerest...." << std::endl;
             host_status.allow_power_on = 0;

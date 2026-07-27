@@ -211,6 +211,13 @@ void ovm_api::handle_everest_connection_state() {
     auto handle_status = [this](bool status) {
         if (status) {
             utilities::print_error(m_cb_identifier, "OVM/EVEREST", 0) << "EVerest connected" << std::endl;
+            // The communication fault is edge triggered on the ChargeBridge connection, so a
+            // freshly (re)started EVerest does not know about it. Re-assert it here, otherwise
+            // the monitor reads as fault free for an unreachable ChargeBridge. Raising an
+            // already active error is a no-op in the EVerest error framework.
+            if (not m_cb_connected) {
+                raise_comm_fault();
+            }
         } else {
             utilities::print_error(m_cb_identifier, "OVM/EVEREST", 1) << "Waiting for EVerest...." << std::endl;
         }

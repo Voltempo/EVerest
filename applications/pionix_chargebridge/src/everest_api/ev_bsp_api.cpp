@@ -389,6 +389,13 @@ void ev_bsp_api::handle_everest_connection_state() {
             utilities::print_error(m_cb_identifier, "EV/EVEREST", 0) << "EVerest connected" << std::endl;
             // re-send last CP state event
             send_bsp_event(last_cp_event);
+            // The communication fault is edge triggered on the ChargeBridge connection, so a
+            // freshly (re)started EVerest does not know about it. Re-assert it here, otherwise
+            // the board support reads as fault free for an unreachable ChargeBridge. Raising an
+            // already active error is a no-op in the EVerest error framework.
+            if (not m_cb_connected) {
+                raise_comm_fault();
+            }
         } else {
             utilities::print_error(m_cb_identifier, "EV/EVEREST", 1) << "Waiting for EVerest..." << std::endl;
             // unplug CP if EVerest disconnects
