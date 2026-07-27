@@ -21,10 +21,12 @@ struct fw_update_config {
 class sync_fw_updater {
 public:
     /// @param abort_requested Optional cancellation check, polled before every firmware chunk is
-    /// sent. Returning true aborts the (potentially multi-minute) upload, so a shutdown does not have
-    /// to wait for the flash to complete. The abort is reported like any other upload failure; it
-    /// happens before the finish packet, so the device keeps running its previous firmware. Defaults
-    /// to an empty check, i.e. no cancellation at all.
+    /// sent and while any request waits for its reply (version probe, upload start, chunk, connection
+    /// check). Returning true aborts the (potentially multi-minute) upload and bounds every probe to
+    /// a fraction of a second, so a shutdown does not have to wait for the flash or for a full retry
+    /// budget to expire. The abort is reported like any other failure; it happens before the finish
+    /// packet, so the device keeps running its previous firmware. The finish handshake itself is
+    /// intentionally not cancellable. Defaults to an empty check, i.e. no cancellation at all.
     sync_fw_updater(fw_update_config const& config, std::function<bool()> abort_requested = {});
     ~sync_fw_updater() = default;
 
@@ -42,6 +44,7 @@ public:
 private:
     bool check_reply(utilities::sync_udp_client::reply const& val);
     bool is_abort_requested() const;
+    std::string connection_result_message(bool connected) const;
 
     bool upload_firmware(bool& aborted);
 

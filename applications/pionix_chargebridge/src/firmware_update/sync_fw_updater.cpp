@@ -57,7 +57,7 @@ bool sync_fw_updater::is_abort_requested() const {
 std::optional<std::string> sync_fw_updater::get_fw_version() {
     auto pl = make_get_version_command();
 
-    auto result = m_udp.request_reply(pl);
+    auto result = m_udp.request_reply(pl, m_abort_requested);
     if (not result) {
         return std::nullopt;
     }
@@ -70,14 +70,16 @@ std::optional<std::string> sync_fw_updater::get_fw_version() {
 void sync_fw_updater::print_fw_version() {
     auto result = get_fw_version();
     utilities::print_error(m_config.cb, "FIRMWARE", not result.has_value())
-        << "Firmware version " << result.value_or("ERROR") << std::endl;
+        << "Firmware version " << result.value_or(is_abort_requested() ? "ABORTED" : "ERROR") << std::endl;
 }
 
 bool sync_fw_updater::check_if_correct_fw_installed() {
     auto installed_fw = get_fw_version();
 
     if (not installed_fw.has_value()) {
-        return true;
+        // A cancelled version probe must not be mistaken for "the device already runs the right
+        // firmware": report a mismatch so the caller's own abort handling decides what happens next.
+        return not is_abort_requested();
     }
 
     charge_bridge::filesystem_utils::CryptSignedHeader hdr;
@@ -105,9 +107,8 @@ bool sync_fw_updater::quick_check_connection() {
     static const std::uint16_t rr_retires_ms = 10;
 
     everest::lib::io::udp::udp_payload pl = make_ping_command();
-    auto result = m_udp.request_reply(pl, rr_timeout_ms, rr_retires_ms).has_value();
-    utilities::print_error(m_config.cb, "FIRMWARE", not result)
-        << (result ? "ChargeBride Connected" : "No connection to ChargeBridge") << std::endl;
+    auto result = m_udp.request_reply(pl, rr_timeout_ms, rr_retires_ms, m_abort_requested).has_value();
+    utilities::print_error(m_config.cb, "FIRMWARE", not result) << connection_result_message(result) << std::endl;
     return result;
 }
 
@@ -116,16 +117,25 @@ bool sync_fw_updater::check_connection() {
     static const std::uint16_t rr_retires_ms = 100;
 
     everest::lib::io::udp::udp_payload pl = make_ping_command();
-    auto result = m_udp.request_reply(pl, rr_timeout_ms, rr_retires_ms).has_value();
-    utilities::print_error(m_config.cb, "FIRMWARE", not result)
-        << (result ? "ChargeBride Connected" : "No connection to ChargeBridge") << std::endl;
+    auto result = m_udp.request_reply(pl, rr_timeout_ms, rr_retires_ms, m_abort_requested).has_value();
+    utilities::print_error(m_config.cb, "FIRMWARE", not result) << connection_result_message(result) << std::endl;
     return result;
+}
+
+std::string sync_fw_updater::connection_result_message(bool connected) const {
+    if (connected) {
+        return "ChargeBride Connected";
+    }
+    if (is_abort_requested()) {
+        return "Connection check to ChargeBridge aborted on request";
+    }
+    return "No connection to ChargeBridge";
 }
 
 bool sync_fw_updater::ping() {
     everest::lib::io::udp::udp_payload pl = make_ping_command();
 
-    return m_udp.request_reply(pl).has_value();
+    return m_udp.request_reply(pl, m_abort_requested).has_value();
 }
 
 bool sync_fw_updater::check_reply(utilities::sync_udp_client::reply const& val) {
@@ -174,6 +184,7 @@ bool sync_fw_updater::upload_firmware(bool& aborted) {
     charge_bridge::filesystem_utils::CryptSignedHeader hdr;
 
     if (not upload_init(path, offset, hdr)) {
+        aborted = is_abort_requested();
         return false;
     }
 
@@ -235,7 +246,7 @@ bool sync_fw_updater::upload_init(const fs::path& file_path, std::uint32_t& offs
     std::memcpy(msg.data.iv, hdr.iv.data(), sizeof(msg.data.iv));
 
     utilities::struct_to_vector(msg, payload.buffer);
-    auto result = m_udp.request_reply(payload);
+    auto result = m_udp.request_reply(payload, m_abort_requested);
 
     return check_reply(result);
 }
@@ -268,9 +279,15 @@ bool sync_fw_updater::upload_transfer(const fs::path& file_path, std::uint16_t& 
             // Care must be taken when sending this over, since on the
             // receiving end we must remove the PKCS#7 added bytes
             auto block = make_fw_chunk(sector, last_chunk, buffer);
-            auto result = m_udp.request_reply(block);
+            auto result = m_udp.request_reply(block, m_abort_requested);
 
             if (not check_reply(result)) {
+                // A chunk whose retries were cut short by the abort check is a cancellation, not a
+                // transfer error: report it as such and leave the finish packet unsent either way.
+                if (is_abort_requested()) {
+                    aborted = true;
+                    return true; // Interrupt
+                }
                 utilities::print_error(m_config.cb, "FIRMWARE", 1) << "chunk could not be sent" << std::endl;
 
                 send_failed = true;
@@ -302,7 +319,9 @@ bool sync_fw_updater::upload_finish([[maybe_unused]] const fs::path& file_path, 
     udp_payload payload;
     utilities::struct_to_vector(fw_check_packet, payload.buffer);
 
-    // The final check can be a very slow operation due to the cryptography involved
+    // The final check can be a very slow operation due to the cryptography involved.
+    // Deliberately no abort check here: the image is on the device already and interrupting the
+    // finish handshake would leave it with a half-committed update (see upload_firmware()).
     static const std::uint16_t rr_timeout_ms = 10000;
     static const std::uint16_t rr_retires_ms = 1;
     auto result = m_udp.request_reply(payload, rr_timeout_ms, rr_retires_ms);
