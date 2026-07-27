@@ -24,6 +24,13 @@ using namespace everest::lib::API;
 
 namespace charge_bridge::evse_bsp {
 
+namespace {
+// There is exactly one source for the communication fault, so it does not need a sub_type to
+// tell instances apart. Raise and clear must agree on it, otherwise the clear does not match
+// the raised instance.
+constexpr auto comm_fault_subtype = "";
+} // namespace
+
 ev_bsp_api::ev_bsp_api([[maybe_unused]] evse_ev_bsp_config const& config, std::string const& cb_identifier,
                        evse_bsp_host_to_cb& host_status) :
     host_status(host_status), m_cb_identifier(cb_identifier) {
@@ -275,11 +282,11 @@ void ev_bsp_api::dispatch(std::string const& operation, std::string const& paylo
 }
 
 void ev_bsp_api::raise_comm_fault() {
-    send_raise_error(API_GENERIC::ErrorEnum::CommunicationFault, "ChargeBridge not available", "");
+    send_raise_error(API_GENERIC::ErrorEnum::CommunicationFault, comm_fault_subtype, "ChargeBridge not available");
 }
 
 void ev_bsp_api::clear_comm_fault() {
-    send_clear_error(API_GENERIC::ErrorEnum::CommunicationFault, "ChargeBridge not available");
+    send_clear_error(API_GENERIC::ErrorEnum::CommunicationFault, comm_fault_subtype);
 }
 
 void ev_bsp_api::receive_enable([[maybe_unused]] std::string const& payload) {

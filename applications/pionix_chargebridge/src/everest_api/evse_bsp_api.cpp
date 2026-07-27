@@ -33,6 +33,11 @@ namespace {
 // one instance would tell the CSMS that CX023 is gone while the other source is still faulted.
 constexpr auto pp_invalid_subtype = "PPINVALID";
 constexpr auto pp_fault_subtype_state = "PPSTATE";
+
+// There is exactly one source for the communication fault, so it does not need a sub_type to
+// tell instances apart. Raise and clear must agree on it, otherwise the clear does not match
+// the raised instance.
+constexpr auto comm_fault_subtype = "";
 } // namespace
 
 evse_bsp_api::evse_bsp_api(evse_bsp_config const& config, std::string const& cb_identifier,
@@ -149,11 +154,11 @@ void evse_bsp_api::dispatch(std::string const& operation, std::string const& pay
 }
 
 void evse_bsp_api::raise_comm_fault() {
-    send_raise_error(API_BSP::ErrorEnum::CommunicationFault, "ChargeBridge not available", "");
+    send_raise_error(API_BSP::ErrorEnum::CommunicationFault, comm_fault_subtype, "ChargeBridge not available");
 }
 
 void evse_bsp_api::clear_comm_fault() {
-    send_clear_error(API_BSP::ErrorEnum::CommunicationFault, "ChargeBridge not available", "");
+    send_clear_error(API_BSP::ErrorEnum::CommunicationFault, comm_fault_subtype, "");
 }
 
 void evse_bsp_api::handle_event_cp(std::uint8_t cp) {
