@@ -101,6 +101,9 @@ private:
     std::future<bool> start_internal_runtime();
     void create_internal_runtime();
     void create_internal_runtime_eagerly();
+    bool has_configured_bridge() const;
+    bool has_existing_bridge() const;
+    void report_runtime_start_failure(std::string const& reason);
     void cleanup_internal_runtime();
     void connect_internal_runtime_endpoints();
     void disconnect_internal_runtime_endpoints();
@@ -145,6 +148,10 @@ private:
     bool m_was_connected{false};
     bool m_discovery_active{false};
     bool m_internal_runtime_started{false};
+    // Bridges whose construction failure has already been reported, so the retry on the manager
+    // cadence does not repeat the message until that bridge has been created successfully.
+    std::set<std::string> m_bridge_create_failures_reported;
+    bool m_runtime_start_failure_reported{false};
     std::thread m_manager;
     endpoint_intent_info m_endpoint_intent;
     // Network identity of the discovered endpoint (hostname, service instance, TXT records). Empty

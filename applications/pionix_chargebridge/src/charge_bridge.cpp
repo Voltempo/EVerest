@@ -44,6 +44,33 @@ std::pair<bool, std::set<std::string>> make_interface_list(std::string const& st
 
 const int mqtt_reconnect_timeout_ms = 1000;
 
+// Runs one bridge constructor in isolation. Every bridge owns host-local devices whose creation can
+// fail on its own (the vcan device needs CAP_NET_ADMIN, a pty symlink needs a writable target, ...),
+// so such a failure must neither keep the remaining bridges from coming up nor escape to the caller:
+// the missing bridge is simply retried on the next attempt. An existing object is left untouched.
+// Failures are reported once per bridge (see failures_reported) because the retry runs on the ~10 s
+// manager cadence and a permanently missing capability would otherwise flood the log.
+template <class BridgeT, class FactoryT>
+void create_bridge(std::string const& cb_name, std::string const& bridge_name, std::unique_ptr<BridgeT>& bridge,
+                   std::set<std::string>& failures_reported, FactoryT&& factory) {
+    if (bridge) {
+        return;
+    }
+    try {
+        bridge = factory();
+        failures_reported.erase(bridge_name);
+    } catch (std::exception const& e) {
+        if (failures_reported.insert(bridge_name).second) {
+            utilities::print_error(cb_name, "RUNTIME", -1)
+                << "Failed to create " << bridge_name << ": " << e.what() << std::endl;
+        }
+    } catch (...) {
+        if (failures_reported.insert(bridge_name).second) {
+            utilities::print_error(cb_name, "RUNTIME", -1) << "Failed to create " << bridge_name << std::endl;
+        }
+    }
+}
+
 endpoint_intent_info parse_endpoint_intent(std::string const& cb_remote) {
     endpoint_intent_info result;
 
@@ -273,6 +300,15 @@ std::future<bool> charge_bridge::start_internal_runtime() {
             // Construction is normally done eagerly at startup (see create_internal_runtime_eagerly),
             // so this only retries bridges whose local devices could not be created back then.
             create_internal_runtime();
+            if (has_configured_bridge() and not has_existing_bridge()) {
+                // Not a single configured bridge exists: there is nothing to connect or register, and
+                // reporting success would latch the runtime as started and stop the construction
+                // retries. Report the start as failed instead; the manager logs it and retries the
+                // whole sequence — construction included — in the next cycle.
+                promise->set_value(false);
+                m_cb_status.notify_one();
+                return;
+            }
             connect_internal_runtime_endpoints();
             auto runtime_registered = register_internal_events(*m_event_handler);
             if (not runtime_registered) {
@@ -305,40 +341,75 @@ std::future<bool> charge_bridge::start_internal_runtime() {
 // and (re)established by connect_internal_runtime_endpoints() once the CB answers. Objects that
 // already exist are left untouched, so this is a no-op after a successful eager creation and a
 // retry for whatever failed. Must not run concurrently with the event loop touching the bridges.
+// Every bridge is constructed in isolation (see create_bridge): one bridge that cannot bring up its
+// host-local device does not suppress the others, and is retried on the next call.
 void charge_bridge::create_internal_runtime() {
-    if (m_config.can0.has_value() and not m_can_0_client) {
-        m_can_0_client = std::make_unique<can_bridge>(m_config.can0.value(), m_ready_notify);
+    if (m_config.can0.has_value()) {
+        create_bridge(m_config.cb_name, "can bridge", m_can_0_client, m_bridge_create_failures_reported,
+                      [this]() { return std::make_unique<can_bridge>(m_config.can0.value(), m_ready_notify); });
     }
-    if (m_config.serial1.has_value() and not m_pty_1) {
-        m_pty_1 = std::make_unique<serial_bridge>(m_config.serial1.value(), m_ready_notify);
+    if (m_config.serial1.has_value()) {
+        create_bridge(m_config.cb_name, "serial bridge 1", m_pty_1, m_bridge_create_failures_reported,
+                      [this]() { return std::make_unique<serial_bridge>(m_config.serial1.value(), m_ready_notify); });
     }
-    if (m_config.serial2.has_value() and not m_pty_2) {
-        m_pty_2 = std::make_unique<serial_bridge>(m_config.serial2.value(), m_ready_notify);
+    if (m_config.serial2.has_value()) {
+        create_bridge(m_config.cb_name, "serial bridge 2", m_pty_2, m_bridge_create_failures_reported,
+                      [this]() { return std::make_unique<serial_bridge>(m_config.serial2.value(), m_ready_notify); });
     }
-    if (m_config.serial3.has_value() and not m_pty_3) {
-        m_pty_3 = std::make_unique<serial_bridge>(m_config.serial3.value(), m_ready_notify);
+    if (m_config.serial3.has_value()) {
+        create_bridge(m_config.cb_name, "serial bridge 3", m_pty_3, m_bridge_create_failures_reported,
+                      [this]() { return std::make_unique<serial_bridge>(m_config.serial3.value(), m_ready_notify); });
     }
-    if (m_config.plc.has_value() and not m_plc) {
-        m_plc = std::make_unique<plc_bridge>(m_config.plc.value(), m_ready_notify);
+    if (m_config.plc.has_value()) {
+        create_bridge(m_config.cb_name, "plc bridge", m_plc, m_bridge_create_failures_reported,
+                      [this]() { return std::make_unique<plc_bridge>(m_config.plc.value(), m_ready_notify); });
     }
-    if (m_config.bsp.has_value() and not m_bsp) {
-        m_bsp = std::make_unique<bsp_bridge>(m_config.bsp.value(), m_ready_notify);
+    if (m_config.bsp.has_value()) {
+        create_bridge(m_config.cb_name, "bsp bridge", m_bsp, m_bridge_create_failures_reported,
+                      [this]() { return std::make_unique<bsp_bridge>(m_config.bsp.value(), m_ready_notify); });
     }
-    if (m_config.io.has_value() and not m_io) {
-        m_io = std::make_unique<io_bridge>(m_config.io.value(), m_ready_notify);
+    if (m_config.io.has_value()) {
+        create_bridge(m_config.cb_name, "io bridge", m_io, m_bridge_create_failures_reported,
+                      [this]() { return std::make_unique<io_bridge>(m_config.io.value(), m_ready_notify); });
     }
-    if (m_config.heartbeat.has_value() and not m_heartbeat) {
-        auto heartbeat_cb = [this](bool connected) {
-            {
-                auto handle = m_cb_status.handle();
-                handle->is_connected = connected;
-            }
-            set_bridges_cb_connection_status(connected);
-            m_cb_status.notify_one();
-        };
+    if (m_config.heartbeat.has_value()) {
+        create_bridge(m_config.cb_name, "heartbeat service", m_heartbeat, m_bridge_create_failures_reported, [this]() {
+            auto heartbeat_cb = [this](bool connected) {
+                {
+                    auto handle = m_cb_status.handle();
+                    handle->is_connected = connected;
+                }
+                set_bridges_cb_connection_status(connected);
+                m_cb_status.notify_one();
+            };
 
-        m_heartbeat = std::make_unique<heartbeat_service>(m_config.heartbeat.value(), heartbeat_cb, m_ready_notify);
+            return std::make_unique<heartbeat_service>(m_config.heartbeat.value(), heartbeat_cb, m_ready_notify);
+        });
     }
+}
+
+// True if the config asks for at least one bridge, i.e. if an empty runtime means something failed.
+bool charge_bridge::has_configured_bridge() const {
+    return m_config.can0.has_value() or m_config.serial1.has_value() or m_config.serial2.has_value() or
+           m_config.serial3.has_value() or m_config.plc.has_value() or m_config.bsp.has_value() or
+           m_config.io.has_value() or m_config.heartbeat.has_value();
+}
+
+// True if at least one bridge object exists, i.e. if there is anything to connect and register.
+bool charge_bridge::has_existing_bridge() const {
+    return m_can_0_client or m_pty_1 or m_pty_2 or m_pty_3 or m_plc or m_bsp or m_io or m_heartbeat;
+}
+
+// Reports a failed internal runtime start once per failure episode: the manager retries on its ~10 s
+// cadence, so logging every attempt would flood the log for a device that stays unusable, while the
+// flag still lets the next failure after a successful start be reported.
+void charge_bridge::report_runtime_start_failure(std::string const& reason) {
+    if (m_runtime_start_failure_reported) {
+        return;
+    }
+    m_runtime_start_failure_reported = true;
+    utilities::print_error(m_config.cb_name, "RUNTIME", 1)
+        << "Failed to start the internal runtime: " << reason << " (retrying in next cycle)" << std::endl;
 }
 
 // Creates the bridge objects at startup, before any connection to the ChargeBridge exists, so the
@@ -351,6 +422,8 @@ void charge_bridge::create_internal_runtime() {
 // same state as after stop_internal_runtime(), so first connect and reconnect share one code path.
 void charge_bridge::create_internal_runtime_eagerly() {
     try {
+        // create_internal_runtime() already isolates and reports every per-bridge failure, so this
+        // only catches something unexpected escaping it (a bad_alloc while logging, for instance).
         create_internal_runtime();
     } catch (std::exception const& e) {
         utilities::print_error(m_config.cb_name, "RUNTIME", -1)
@@ -546,8 +619,16 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
                 return;
             }
             try {
-                stop_runtime.get();
+                if (not stop_runtime.get()) {
+                    utilities::print_error(m_config.cb_name, "RUNTIME", 1)
+                        << "Stopping the internal runtime reported a failure" << std::endl;
+                }
+            } catch (std::exception const& e) {
+                utilities::print_error(m_config.cb_name, "RUNTIME", 1)
+                    << "Stopping the internal runtime failed: " << e.what() << std::endl;
             } catch (...) {
+                utilities::print_error(m_config.cb_name, "RUNTIME", 1)
+                    << "Stopping the internal runtime failed with an unknown exception" << std::endl;
             }
             runtime_stop_in_progress = false;
             m_internal_runtime_started = false;
@@ -612,13 +693,19 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
                     bool runtime_started = false;
                     try {
                         runtime_started = startup_runtime.get();
+                        if (not runtime_started) {
+                            report_runtime_start_failure("no bridge could be connected and registered");
+                        }
+                    } catch (std::exception const& e) {
+                        report_runtime_start_failure(e.what());
                     } catch (...) {
-                        runtime_started = false;
+                        report_runtime_start_failure("unknown exception");
                     }
                     startup_runtime_in_progress = false;
                     if (runtime_started) {
                         m_internal_runtime_started = true;
                         m_was_connected = true;
+                        m_runtime_start_failure_reported = false;
                         set_runtime_connection_status(current_status, true);
                     }
                 }
