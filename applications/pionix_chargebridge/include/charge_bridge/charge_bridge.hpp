@@ -109,6 +109,8 @@ private:
     void stop_discovery();
     void set_discovery_pending(bool pending);
     void set_discovery_pending(charge_bridge_status& status, bool pending);
+    void set_bridges_cb_connection_status(bool connected);
+    void set_runtime_connection_status(charge_bridge_status& status, bool connected);
     void handle_discovery(everest::lib::io::mdns::mDNS_discovery const& info);
     void handle_ready();
     void handle_tick();

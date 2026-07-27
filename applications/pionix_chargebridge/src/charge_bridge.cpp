@@ -232,6 +232,35 @@ void charge_bridge::set_discovery_pending(charge_bridge_status& status, bool pen
     }
 }
 
+void charge_bridge::set_bridges_cb_connection_status(bool connected) {
+    if (m_plc) {
+        m_plc->set_cb_connection_status(connected);
+    }
+    if (m_io) {
+        m_io->set_cb_connection_status(connected);
+    }
+    if (m_can_0_client) {
+        m_can_0_client->set_cb_connection_status(connected);
+    }
+}
+
+// Without a 'heartbeat' config block there is no liveness signal from the ChargeBridge, so the
+// connection state is derived from the internal runtime lifecycle instead: connected once the
+// runtime is up (which only happens after update_firmware()'s successful connection probe) and
+// disconnected once it has been torn down. Called from the manager thread with the status monitor
+// already locked; the bridges' observables live on the event loop thread, so the cb connection
+// status is applied there. No-op when a heartbeat service is configured: it owns is_connected then.
+void charge_bridge::set_runtime_connection_status(charge_bridge_status& status, bool connected) {
+    if (m_config.heartbeat.has_value()) {
+        return;
+    }
+    status.is_connected = connected;
+    if (m_event_handler) {
+        m_event_handler->add_action([this, connected]() { set_bridges_cb_connection_status(connected); });
+    }
+    m_cb_status.notify_one();
+}
+
 std::future<bool> charge_bridge::start_internal_runtime() {
     auto promise = std::make_shared<std::promise<bool>>();
     auto result = promise->get_future();
@@ -332,15 +361,7 @@ void charge_bridge::create_internal_runtime() {
                 auto handle = m_cb_status.handle();
                 handle->is_connected = connected;
             }
-            if (m_plc) {
-                m_plc->set_cb_connection_status(connected);
-            }
-            if (m_io) {
-                m_io->set_cb_connection_status(connected);
-            }
-            if (m_can_0_client) {
-                m_can_0_client->set_cb_connection_status(connected);
-            }
+            set_bridges_cb_connection_status(connected);
             m_cb_status.notify_one();
         };
 
@@ -485,7 +506,7 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
     }
 
     using clock = std::chrono::steady_clock;
-    auto action = [this](auto& status_handle, charge_bridge_status& current_status, int& error_count,
+    auto action = [this](auto& status_handle, charge_bridge_status& current_status,
                          std::optional<clock::time_point>& next_connect_retry_time, std::future<bool>& startup_runtime,
                          bool& startup_runtime_in_progress,
                          std::optional<clock::time_point>& discovery_attempt_deadline,
@@ -503,7 +524,7 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
             runtime_stop_in_progress = false;
             m_internal_runtime_started = false;
             m_was_connected = false;
-            error_count = 0;
+            set_runtime_connection_status(current_status, false);
 
             if (is_mdns_endpoint()) {
                 set_discovery_pending(current_status, true);
@@ -570,7 +591,7 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
                     if (runtime_started) {
                         m_internal_runtime_started = true;
                         m_was_connected = true;
-                        error_count = 0;
+                        set_runtime_connection_status(current_status, true);
                     }
                 }
                 return;
@@ -597,7 +618,7 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
                 } else {
                     m_event_handler->add_action([this]() { register_internal_events(*m_event_handler); });
                     m_was_connected = true;
-                    error_count = 0;
+                    set_runtime_connection_status(current_status, true);
                 }
             } else if (is_mdns_endpoint() && not m_internal_runtime_started) {
                 set_discovery_pending(current_status, true);
@@ -627,7 +648,6 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
         auto handle = m_cb_status.handle();
         bool last_is_connected = handle->is_connected;
         bool last_discovery_pending = handle->discovery_pending;
-        int error_count = 0;
         auto compute_wait_timeout = [&](std::chrono::milliseconds wait_timeout) {
             if (handle->discovery_pending && is_mdns_endpoint()) {
                 if (next_connect_retry_time.has_value()) {
@@ -691,7 +711,7 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
             return false;
         };
         while (run.load()) {
-            action(handle, *handle, error_count, next_connect_retry_time, startup_runtime, startup_runtime_in_progress,
+            action(handle, *handle, next_connect_retry_time, startup_runtime, startup_runtime_in_progress,
                    discovery_attempt_deadline, discovery_retry_time, stop_runtime, runtime_stop_in_progress);
             if (handle->discovery_pending && is_mdns_endpoint()) {
                 auto wait_timeout =
