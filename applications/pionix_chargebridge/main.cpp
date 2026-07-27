@@ -48,8 +48,10 @@ mode parse_args(int argc, char* argv[], std::vector<std::string>& config_files,
         std::cout << "--status-refresh-ms=100\n"
                      "                    deprecated: terminal redraws are event-driven, this value is ignored\n";
         std::cout << "--status-message-lines=10\n"
-                     "                    terminal message buffer size, minimum is 0 (disabled), maximum is 1000\n"
+                     "                    terminal message panel height, maximum is 1000\n"
                      "                    shows latest N non-success messages below dashboard\n"
+                     "                    0 is clamped to 1: terminal mode captures all diagnostics, so the\n"
+                     "                    panel cannot be hidden; use --status-output=log for plain log output\n"
                      "                    ignored in log/off modes\n";
         std::cout << "--status-no-color  disable ANSI colors in the terminal dashboard output\n"
                      "                    message area and non-color controls remain unchanged\n";
@@ -193,6 +195,14 @@ int main(int argc, char* argv[]) {
     effective_ui_options.status_refresh_ms = ui_options.status_refresh_ms;
     effective_ui_options.status_message_lines = ui_options.status_message_lines;
     effective_ui_options.no_color = ui_options.no_color;
+    // In terminal mode the UI captures every print_error/print_info line, so a hidden message panel
+    // would drop all diagnostics. status_ui clamps the panel to one line; tell the user about it.
+    if (effective_status_output_mode == utilities::status_output_mode::terminal &&
+        effective_ui_options.status_message_lines == 0) {
+        std::cerr << "--status-message-lines=0 would hide all diagnostics in terminal mode; using 1 line. "
+                     "Use --status-output=log for plain log output without a dashboard."
+                  << std::endl;
+    }
     for (auto const& elem : config_files) {
         auto config_list = utilities::parse_config_multi(elem);
         if (config_list.empty()) {

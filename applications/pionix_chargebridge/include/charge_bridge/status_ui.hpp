@@ -29,6 +29,9 @@ struct status_ui_options {
     utilities::status_output_mode status_output{utilities::status_output_mode::auto_mode};
     // Deprecated: terminal redraws are event-driven via ftxui, this value is ignored in terminal mode.
     std::chrono::milliseconds status_refresh_ms{std::chrono::milliseconds(100)};
+    // Height of the terminal message panel. Terminal mode captures all print_error/print_info output
+    // into that panel, so 0 is clamped to 1: hiding it would discard every diagnostic. Ignored in
+    // log/off modes, where messages keep going to stdout.
     std::size_t status_message_lines{10};
     bool no_color{false};
 };

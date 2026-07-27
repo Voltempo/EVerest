@@ -172,6 +172,14 @@ status_ui::status_ui(status_ui_options options, std::vector<std::string> cb_name
         }
     }
 
+    // Installing the print sink redirects every print_error/print_info line into this UI, so in
+    // terminal mode a hidden message panel would swallow all diagnostics with no stdout fallback.
+    // Keep at least one (scrollable) message line; --status-output=log is the way to get plain
+    // diagnostics without a dashboard.
+    if (m_terminal_active()) {
+        m_options.status_message_lines = std::max<std::size_t>(m_options.status_message_lines, 1);
+    }
+
     // Keep a scrollback buffer larger than the visible window so the log can be scrolled back.
     constexpr std::size_t k_min_scrollback = 1000;
     m_log_capacity = std::max(m_options.status_message_lines, k_min_scrollback);
@@ -215,7 +223,10 @@ void status_ui::publish(utilities::chargebridge_status status) {
 }
 
 void status_ui::publish_message(std::string device, std::string message) {
-    if (not m_terminal_active() || m_options.status_message_lines == 0) {
+    // Terminal mode is the only mode that owns a message buffer; in log/off mode print_error keeps
+    // writing to stdout itself (no sink is installed). status_message_lines is >= 1 here, so
+    // captured messages are always retained and displayed.
+    if (not m_terminal_active()) {
         return;
     }
 
@@ -775,10 +786,10 @@ void status_ui::run_terminal_loop() {
     });
     auto split = ResizableSplitLeft(list_panel, detail_panel, &m_list_split_size);
 
-    if (m_options.status_message_lines > 0) {
-        m_msg_split_size = std::max(3, static_cast<int>(m_options.status_message_lines) + 2);
-        split = ResizableSplitBottom(Scroller(messages, /*stick_to_bottom=*/true), split, &m_msg_split_size);
-    }
+    // The message panel is always present (status_message_lines is clamped to >= 1 in terminal mode)
+    // so no diagnostic can end up invisible; it can still be shrunk by dragging its border.
+    m_msg_split_size = std::max(3, static_cast<int>(m_options.status_message_lines) + 2);
+    split = ResizableSplitBottom(Scroller(messages, /*stick_to_bottom=*/true), split, &m_msg_split_size);
 
     auto app = Renderer(split, [&] {
         return vbox({
