@@ -41,9 +41,9 @@ mode parse_args(int argc, char* argv[], std::vector<std::string>& config_files,
         std::cout << "--update_only       use this flag to execute an update and stop the application after\n";
         std::cout << "--status-output=auto|log|terminal|off\n"
                      "                    output mode for charge_bridge status output.\n"
-                     "                    auto: table in TTY, key=value log otherwise\n"
+                     "                    auto: table if stdin and stdout are a TTY, key=value log otherwise\n"
                      "                    log: one-line key=value output\n"
-                     "                    terminal: always table output (requires stdout TTY)\n"
+                     "                    terminal: always table output (requires stdin and stdout TTY)\n"
                      "                    off: suppress status output\n";
         std::cout << "--status-refresh-ms=100\n"
                      "                    deprecated: terminal redraws are event-driven, this value is ignored\n";
@@ -179,16 +179,25 @@ int main(int argc, char* argv[]) {
     if (mode_of_operation == mode::error) {
         return EXIT_FAILURE;
     }
+    // The terminal dashboard also reads and raw-modes stdin, so both fds must be TTYs. A TTY stdout with
+    // an unusable stdin (redirected from /dev/null, closed fd 0) makes the input listener spin at 100% CPU.
+    bool stdin_is_tty = isatty(STDIN_FILENO);
     bool stdout_is_tty = isatty(STDOUT_FILENO);
-    if (status_output_mode == utilities::status_output_mode::terminal && not stdout_is_tty) {
-        std::cerr << "--status-output=terminal requires stdout to be a TTY" << std::endl;
+    bool terminal_usable = stdin_is_tty && stdout_is_tty;
+    if (status_output_mode == utilities::status_output_mode::terminal && not terminal_usable) {
+        if (not stdin_is_tty) {
+            std::cerr << "--status-output=terminal requires stdin to be a TTY" << std::endl;
+        }
+        if (not stdout_is_tty) {
+            std::cerr << "--status-output=terminal requires stdout to be a TTY" << std::endl;
+        }
         return EXIT_FAILURE;
     }
 
     auto effective_status_output_mode = status_output_mode;
     if (status_output_mode == utilities::status_output_mode::auto_mode) {
         effective_status_output_mode =
-            stdout_is_tty ? utilities::status_output_mode::terminal : utilities::status_output_mode::log;
+            terminal_usable ? utilities::status_output_mode::terminal : utilities::status_output_mode::log;
     }
     status_ui_options effective_ui_options;
     effective_ui_options.status_output = effective_status_output_mode;
