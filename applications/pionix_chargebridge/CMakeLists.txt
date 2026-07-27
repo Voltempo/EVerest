@@ -5,14 +5,18 @@ if(DEFINED EVEREST_IO_WITH_MQTT AND NOT EVEREST_IO_WITH_MQTT)
             "Set EVEREST_IO_WITH_MQTT=ON or disable EVEREST_BUILD_APPLICATIONS.")
 endif()
 
-find_package(ryml QUIET)
-
-# ftxui powers the interactive terminal status UI. The top-level project resolves it via
-# find_package(ftxui 6 QUIET); it is mandatory for this application.
+# ftxui powers the interactive terminal status UI and is mandatory for this application. It is
+# provided either by the dependency manager (EVEREST_DEPENDENCY_ENABLED_FTXUI) or, for system
+# dependency builds, by find_package(ftxui 6 QUIET) in the top level CMakeLists.txt. If it is not
+# available, skip only this application instead of failing the whole project configuration.
 if(NOT TARGET ftxui::component)
-    message(FATAL_ERROR "pionix_chargebridge requires ftxui (ftxui::component target not found). "
-            "Enable the ftxui dependency (EVEREST_DEPENDENCY_ENABLED_FTXUI).")
+    message(WARNING "Not building pionix_chargebridge because dependency ftxui is not available. "
+            "Remove ftxui from EVEREST_EXCLUDE_DEPENDENCIES, set EVEREST_DEPENDENCY_ENABLED_FTXUI=ON "
+            "or install ftxui 6 for system dependency builds.")
+    return()
 endif()
+
+find_package(ryml QUIET)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
