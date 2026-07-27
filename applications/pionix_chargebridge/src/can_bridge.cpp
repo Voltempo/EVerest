@@ -60,6 +60,15 @@ can_bridge::can_bridge(can_bridge_config const& config, everest::lib::io::event:
     m_ready_notify(ready_notify) {
 
     auto& manager = everest::lib::io::netlink::vcan_netlink_manager::Instance();
+    // The manager is application agnostic and reports to std::cerr by default, which corrupts the
+    // terminal status output (the vcan setup needs CAP_NET_ADMIN, so the failure is common and is
+    // repeated on every retry). Route it through the print sink instead. The handler is stateless
+    // apart from a copied identifier - the message already names the interface - so it stays valid
+    // for the lifetime of the manager singleton, which outlives this bridge.
+    manager.set_error_handler([identifier = config.cb + "/" + config.item](std::string const& message) {
+        utilities::print_error(identifier, "CAN/NETLINK", 1) << message << std::endl;
+    });
+
     auto success = manager.create(config.can_device) && manager.bring_up(config.can_device);
     if (success) {
         m_can = std::make_unique<everest::lib::io::can::socket_can>(config.can_device);
