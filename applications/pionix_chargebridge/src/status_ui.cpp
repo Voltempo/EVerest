@@ -174,8 +174,8 @@ status_ui::status_ui(status_ui_options options, std::vector<std::string> cb_name
         }
     }
 
-    // Installing the print sink redirects every print_error/print_info line into this UI, so in
-    // terminal mode a hidden message panel would swallow all diagnostics with no stdout fallback.
+    // While the loop runs, the print sink (installed by run()) redirects every print_error/print_info
+    // line into this UI, so in terminal mode a hidden message panel would swallow all diagnostics.
     // Keep at least one (scrollable) message line; --status-output=log is the way to get plain
     // diagnostics without a dashboard.
     if (m_terminal_active()) {
@@ -185,12 +185,6 @@ status_ui::status_ui(status_ui_options options, std::vector<std::string> cb_name
     // Keep a scrollback buffer larger than the visible window so the log can be scrolled back.
     constexpr std::size_t k_min_scrollback = 1000;
     m_log_capacity = std::max(m_options.status_message_lines, k_min_scrollback);
-
-    if (m_terminal_active()) {
-        utilities::set_print_error_sink([this](std::string device, std::string message) {
-            publish_message(std::move(device), std::move(message));
-        });
-    }
 }
 
 status_ui::~status_ui() {
@@ -257,6 +251,13 @@ void status_ui::run() {
     m_stop_requested.store(false, std::memory_order_release);
 
     if (m_terminal_active()) {
+        // Install the print sink here, not in the constructor: capturing diagnostics before the render
+        // loop exists makes them invisible (a --update_only upload on a TTY used to run blind for
+        // minutes). Everything published before run() therefore keeps going to stdout, which is the
+        // only visible place while no dashboard owns the terminal. stop() clears the sink again.
+        utilities::set_print_error_sink([this](std::string device, std::string message) {
+            publish_message(std::move(device), std::move(message));
+        });
         m_thread = std::thread(&status_ui::run_terminal_loop, this);
     } else {
         m_thread = std::thread(&status_ui::run_log_loop, this);

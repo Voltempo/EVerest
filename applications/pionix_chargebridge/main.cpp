@@ -38,7 +38,9 @@ mode parse_args(int argc, char* argv[], std::vector<std::string>& config_files,
                      "[--status-refresh-ms=100] [--status-message-lines=10] [--status-no-color] {config_file [config_file_2 ....]} \n";
         std::cout << "\n";
         std::cout << "--update            use this flag to execute an update at start and continue operation after\n";
-        std::cout << "--update_only       use this flag to execute an update and stop the application after\n";
+        std::cout << "--update_only       use this flag to execute an update and stop the application after\n"
+                     "                    no status dashboard is started, progress goes to stdout and the exit\n"
+                     "                    status reports whether every update succeeded\n";
         std::cout << "--status-output=auto|log|terminal|off\n"
                      "                    output mode for charge_bridge status output.\n"
                      "                    auto: table if stdin and stdout are a TTY, key=value log otherwise\n"
@@ -251,15 +253,35 @@ int main(int argc, char* argv[]) {
     }
     std::vector<std::unique_ptr<::charge_bridge::charge_bridge>> cb_handler;
 
+    bool update_only_ok = true;
     for (auto const& config : cb_configs) {
         print_charge_bridge_config(config);
         cb_handler.push_back(std::make_unique<::charge_bridge::charge_bridge>(config, status_sink, tick_sink));
         auto& cb = *cb_handler.rbegin();
 
         if (mode_of_operation == mode::update_only) {
-            // Signal handlers are installed already, so let Ctrl-C interrupt the upload here too.
-            cb->update_firmware(true, []() { return not g_run_application.load(); });
+            // Signal handlers are installed already, so let Ctrl-C interrupt the upload here too. The
+            // status UI is not running yet, so the upload's progress goes to plain stdout (the print
+            // sink is installed by ui.run(), see status_ui::run()).
+            update_only_ok =
+                cb->update_firmware(true, []() { return not g_run_application.load(); }) and update_only_ok;
+            if (not g_run_application.load()) {
+                // Aborted: do not construct and update the remaining instances.
+                update_only_ok = false;
+                break;
+            }
         }
+    }
+
+    if (mode_of_operation == mode::update_only) {
+        // --update_only stops the application after the update, as documented in --help: no bridges are
+        // managed and no dashboard is started. cb_handler's manager threads were never started, so
+        // clearing it here only tears the (idle) bridges down.
+        cb_handler.clear();
+        if (auto const signum = g_shutdown_signal.load(); signum != 0) {
+            std::cout << "\nSignal " << signum << " received. Firmware update stopped." << std::endl;
+        }
+        return update_only_ok ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
     ui.run();
