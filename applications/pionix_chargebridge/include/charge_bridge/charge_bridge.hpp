@@ -105,7 +105,6 @@ private:
     bool has_configured_bridge() const;
     bool has_existing_bridge() const;
     void report_runtime_start_failure(std::string const& reason);
-    void cleanup_internal_runtime();
     void connect_internal_runtime_endpoints();
     void disconnect_internal_runtime_endpoints();
     bool unregister_internal_runtime_events(everest::lib::io::event::fd_event_handler& handler);

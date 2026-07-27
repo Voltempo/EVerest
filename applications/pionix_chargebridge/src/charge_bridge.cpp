@@ -476,18 +476,6 @@ void charge_bridge::create_internal_runtime_eagerly() {
     disconnect_internal_runtime_endpoints();
 }
 
-void charge_bridge::cleanup_internal_runtime() {
-    disconnect_internal_runtime_endpoints();
-    m_can_0_client.reset();
-    m_pty_1.reset();
-    m_pty_2.reset();
-    m_pty_3.reset();
-    m_bsp.reset();
-    m_plc.reset();
-    m_io.reset();
-    m_heartbeat.reset();
-}
-
 // (Re)connects the CB-side socket of every existing bridge to the current remote address (the
 // configured one, or the one mDNS discovery found). The host-local devices are not touched.
 void charge_bridge::connect_internal_runtime_endpoints() {
@@ -578,7 +566,10 @@ std::future<bool> charge_bridge::stop_internal_runtime() {
     auto result = promise->get_future();
 
     if (not m_event_handler) {
-        cleanup_internal_runtime();
+        // manage() installs the event handler before anything is connected or registered, so without
+        // it there is nothing to unregister or disconnect. The bridge objects are kept: they own
+        // host-local devices (pty + symlink, vcan, tap) that EVerest modules are configured against
+        // and that must not disappear behind their back.
         promise->set_value(true);
         return result;
     }
@@ -838,14 +829,11 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
                 utilities::print_error(m_config.cb_name, "FIRMWARE", 1) << firmware_error << std::endl;
             }
             if (firmware_ok) {
-                if (not m_internal_runtime_started) {
-                    startup_runtime = start_internal_runtime();
-                    startup_runtime_in_progress = true;
-                } else {
-                    m_event_handler->add_action([this]() { register_internal_events(*m_event_handler); });
-                    m_was_connected = true;
-                    set_runtime_connection_status(current_status, true);
-                }
+                // m_internal_runtime_started and m_was_connected are always set and cleared together,
+                // so reaching this with a started runtime is impossible; start_internal_runtime() also
+                // covers the reconnect case (it connects the endpoints before registering).
+                startup_runtime = start_internal_runtime();
+                startup_runtime_in_progress = true;
             } else if (is_mdns_endpoint() && not m_internal_runtime_started) {
                 set_discovery_pending(current_status, true);
                 next_connect_retry_time = clock::now() + manager_base_cycle;
