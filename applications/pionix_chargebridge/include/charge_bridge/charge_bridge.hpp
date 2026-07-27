@@ -20,6 +20,7 @@
 #include <everest/io/tun_tap/tap_client.hpp>
 #include <everest/util/async/monitor.hpp>
 
+#include <chrono>
 #include <functional>
 #include <future>
 #include <memory>
@@ -119,6 +120,8 @@ private:
     void set_discovery_pending(charge_bridge_status& status, bool pending);
     void set_bridges_cb_connection_status(bool connected);
     void set_runtime_connection_status(charge_bridge_status& status, bool connected);
+    bool needs_liveness_probe(charge_bridge_status const& status) const;
+    bool probe_device_liveness(std::function<bool()> const& abort_requested);
     void handle_discovery(everest::lib::io::mdns::mDNS_discovery const& info);
     void handle_ready();
     void handle_tick();
@@ -152,6 +155,10 @@ private:
     // cadence does not repeat the message until that bridge has been created successfully.
     std::set<std::string> m_bridge_create_failures_reported;
     bool m_runtime_start_failure_reported{false};
+    // Liveness fallback for configs without a heartbeat block (manager thread only): when the next
+    // probe is due and how many consecutive probes have failed so far.
+    std::optional<std::chrono::steady_clock::time_point> m_next_liveness_probe;
+    int m_liveness_probe_failures{0};
     std::thread m_manager;
     endpoint_intent_info m_endpoint_intent;
     // Network identity of the discovered endpoint (hostname, service instance, TXT records). Empty

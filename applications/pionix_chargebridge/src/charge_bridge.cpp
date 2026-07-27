@@ -26,6 +26,10 @@ namespace {
 constexpr auto discovery_attempt_timeout = std::chrono::seconds(10);
 constexpr auto discovery_retry_delay = std::chrono::seconds(1);
 constexpr auto manager_base_cycle = std::chrono::seconds(10);
+// Consecutive failed liveness probes before a heartbeat-less ChargeBridge is declared gone. Two
+// probes debounce a single lost datagram (the probe itself already retries) without letting a dead
+// device look connected for much longer than one manager cycle.
+constexpr int liveness_probe_failure_limit = 2;
 
 std::pair<bool, std::set<std::string>> make_interface_list(std::string const& str, std::string const& pattern) {
     if (str == pattern) {
@@ -284,6 +288,23 @@ void charge_bridge::set_runtime_connection_status(charge_bridge_status& status, 
         m_event_handler->add_action([this, connected]() { set_bridges_cb_connection_status(connected); });
     }
     m_cb_status.notify_one();
+}
+
+// True while the connection state has to be derived from an explicit probe: no heartbeat service
+// owns is_connected, the runtime is up and currently considered connected. With a heartbeat block
+// this is always false, so the heartbeat behaviour is untouched.
+bool charge_bridge::needs_liveness_probe(charge_bridge_status const& status) const {
+    return not m_config.heartbeat.has_value() and m_internal_runtime_started and m_was_connected and
+           status.is_connected;
+}
+
+// Cheap, silent liveness check: the same management-port request/reply ping the reconnect path uses
+// (sync_fw_updater::ping() logs nothing, unlike quick_check_connection()), on a short-lived socket.
+// The abort check is armed so a pending shutdown is not delayed by the request's retry budget.
+// Blocks, so the caller must not hold the status monitor.
+bool charge_bridge::probe_device_liveness(std::function<bool()> const& abort_requested) {
+    firmware_update::sync_fw_updater updater(m_config.firmware, abort_requested);
+    return updater.ping();
 }
 
 std::future<bool> charge_bridge::start_internal_runtime() {
@@ -633,6 +654,8 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
             runtime_stop_in_progress = false;
             m_internal_runtime_started = false;
             m_was_connected = false;
+            m_liveness_probe_failures = 0;
+            m_next_liveness_probe.reset();
             set_runtime_connection_status(current_status, false);
 
             if (is_mdns_endpoint()) {
@@ -681,6 +704,54 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
             m_discovery_active = false;
             discovery_attempt_deadline.reset();
             discovery_retry_time.reset();
+        }
+
+        // Liveness fallback for configs without a heartbeat block: nothing else ever clears
+        // is_connected there, so an unplugged ChargeBridge would report connected forever and mDNS
+        // would never re-discover it. Probing on the regular manager cadence adds no wakeups and no
+        // traffic for heartbeat configs; a healthy device answers in microseconds, so this cannot
+        // reintroduce a 10 s teardown/reconnect thrash.
+        if (needs_liveness_probe(current_status)) {
+            if (not m_next_liveness_probe.has_value()) {
+                // The runtime just came up after a successful connection probe: start the schedule
+                // instead of probing the device again right away.
+                m_next_liveness_probe = now + manager_base_cycle;
+            } else if (now >= m_next_liveness_probe.value()) {
+                m_next_liveness_probe = now + manager_base_cycle;
+                // Blocking UDP request/reply with retries. Release the monitor across it exactly like
+                // update_firmware() below does, so get_status() on the event-loop thread - and with it
+                // every other bridge instance - is not stalled. Nothing inside the unlocked window
+                // touches guarded state, allocates or logs, so the lock is always re-acquired below.
+                status_handle.unlock();
+                bool alive = false;
+                try {
+                    alive = probe_device_liveness([&run]() { return not run.load(); });
+                } catch (...) {
+                    // A probe that cannot even be sent counts as a failed probe; the reason is
+                    // reported by the reconnect path once the runtime has been torn down.
+                    alive = false;
+                }
+                status_handle.lock();
+
+                if (not run.load()) {
+                    // The probe was cancelled by a pending shutdown, so its result says nothing about
+                    // the device. The loop exits right after this.
+                    return;
+                }
+                if (alive) {
+                    m_liveness_probe_failures = 0;
+                } else if (++m_liveness_probe_failures >= liveness_probe_failure_limit) {
+                    utilities::print_error(m_config.cb_name, "RUNTIME", 1)
+                        << "ChargeBridge stopped answering (" << m_liveness_probe_failures
+                        << " failed liveness probes), tearing the internal runtime down" << std::endl;
+                    m_liveness_probe_failures = 0;
+                    m_next_liveness_probe.reset();
+                    // Hands over to the regular teardown below, which stops the runtime and - for
+                    // mDNS endpoints - re-arms discovery, so the device is re-probed and re-discovered
+                    // through the normal connect path.
+                    set_runtime_connection_status(current_status, false);
+                }
+            }
         }
 
         if (m_was_connected and not current_status.is_connected) {
