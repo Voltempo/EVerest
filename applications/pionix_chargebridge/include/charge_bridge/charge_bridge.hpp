@@ -81,7 +81,10 @@ public:
                   std::function<void(utilities::chargebridge_status)> tick_sink = {});
     ~charge_bridge();
 
-    bool update_firmware(bool force);
+    /// @param abort_requested Optional cancellation check, polled between firmware chunks. Returning
+    /// true aborts the upload, which is then reported like a failed update (no runtime start). Used to
+    /// keep shutdown responsive while a multi-minute flash is in progress.
+    bool update_firmware(bool force, std::function<bool()> abort_requested = {});
 
     std::string get_pty_1_slave_path();
     std::string get_pty_2_slave_path();

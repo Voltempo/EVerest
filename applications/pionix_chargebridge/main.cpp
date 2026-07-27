@@ -257,7 +257,8 @@ int main(int argc, char* argv[]) {
         auto& cb = *cb_handler.rbegin();
 
         if (mode_of_operation == mode::update_only) {
-            cb->update_firmware(true);
+            // Signal handlers are installed already, so let Ctrl-C interrupt the upload here too.
+            cb->update_firmware(true, []() { return not g_run_application.load(); });
         }
     }
 
@@ -269,8 +270,19 @@ int main(int argc, char* argv[]) {
     }
 
     ev_handler.run(g_run_application);
-    cb_handler.clear();
+    // Stop the UI first: it owns the terminal (ftxui alternate screen), and destroying the bridges
+    // joins their manager threads, which can still be finishing a cancelled firmware upload. Doing it
+    // the other way round leaves the user staring at a frozen dashboard with no output.
+    //
+    // Safe in this order because status_ui::stop() only lowers flags, drains its queue and joins the
+    // loop thread — the ftxui screen is created and destroyed exclusively on that thread. Afterwards
+    // status_ui::publish() from the bridges is still valid (terminal mode: mutex-guarded state plus a
+    // redraw flag; log mode: a push into the stopped queue, which is a no-op), and print_error falls
+    // back to stdout once the print sink is cleared — by then the terminal is restored, so plain
+    // stdout is exactly where those late diagnostics belong. `ui` outlives cb_handler in both this
+    // sequence and the reverse-order destruction at the end of main.
     ui.stop();
+    cb_handler.clear();
     // Reported here, not from the signal handler (see signal_handler): at this point the terminal UI
     // has restored the screen, so plain stdout is safe again.
     if (auto const signum = g_shutdown_signal.load(); signum != 0) {

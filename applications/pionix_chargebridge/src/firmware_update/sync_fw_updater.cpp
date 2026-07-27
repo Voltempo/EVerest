@@ -44,8 +44,14 @@ static everest::lib::io::udp::udp_payload make_get_version_command() {
     return payload;
 }
 
-sync_fw_updater::sync_fw_updater(fw_update_config const& config) :
-    m_udp(config.cb_remote, config.cb_port, 3, default_udp_timeout_ms), m_config(config) {
+sync_fw_updater::sync_fw_updater(fw_update_config const& config, std::function<bool()> abort_requested) :
+    m_udp(config.cb_remote, config.cb_port, 3, default_udp_timeout_ms),
+    m_config(config),
+    m_abort_requested(std::move(abort_requested)) {
+}
+
+bool sync_fw_updater::is_abort_requested() const {
+    return m_abort_requested and m_abort_requested();
 }
 
 std::optional<std::string> sync_fw_updater::get_fw_version() {
@@ -134,8 +140,14 @@ bool sync_fw_updater::check_reply(utilities::sync_udp_client::reply const& val) 
 bool sync_fw_updater::upload_fw() {
     utilities::print_error(m_config.cb, "FIRMWARE", 0) << "Upload in progress" << std::endl;
 
-    if (not upload_firmware()) {
-        utilities::print_error(m_config.cb, "FIRMWARE", 1) << "Upload of firmware image: " << std::endl;
+    bool aborted = false;
+    if (not upload_firmware(aborted)) {
+        if (aborted) {
+            utilities::print_error(m_config.cb, "FIRMWARE", 1)
+                << "Upload of firmware image aborted on request" << std::endl;
+        } else {
+            utilities::print_error(m_config.cb, "FIRMWARE", 1) << "Upload of firmware image: " << std::endl;
+        }
         return false;
     }
 
@@ -143,12 +155,18 @@ bool sync_fw_updater::upload_fw() {
     return true;
 }
 
-bool sync_fw_updater::upload_firmware() {
+bool sync_fw_updater::upload_firmware(bool& aborted) {
     auto path = m_config.fw_path;
     utilities::print_error(m_config.cb, "FIRMWARE", 0) << path << std::endl;
 
     if (not fs::exists(path) || not fs::is_regular_file(path)) {
         utilities::print_error(m_config.cb, "FIRMWARE", 1) << "firmware file not found: " << path << std::endl;
+        return false;
+    }
+
+    // Bail out before the device is put into firmware-update mode at all.
+    if (is_abort_requested()) {
+        aborted = true;
         return false;
     }
 
@@ -162,10 +180,17 @@ bool sync_fw_updater::upload_firmware() {
     std::uint32_t total_bytes = 0;
     std::uint16_t sector = 0;
 
-    if (not upload_transfer(path, sector, offset, total_bytes)) {
+    if (not upload_transfer(path, sector, offset, total_bytes, aborted)) {
+        if (aborted) {
+            utilities::print_error(m_config.cb, "FIRMWARE", 1) << "Upload aborted at sector: " << sector << std::endl;
+            return false;
+        }
         utilities::print_error(m_config.cb, "FIRMWARE", 1) << "Upload failed at sector: " << sector << std::endl;
         return false;
     }
+    // No cancellation point between the last chunk and upload_finish(): the image is fully
+    // transferred by then and finishing takes seconds, while aborting here would throw away a
+    // multi-minute transfer without any benefit.
 
     if (not upload_finish(path, total_bytes, hdr)) {
         return false;
@@ -216,7 +241,7 @@ bool sync_fw_updater::upload_init(const fs::path& file_path, std::uint32_t& offs
 }
 
 bool sync_fw_updater::upload_transfer(const fs::path& file_path, std::uint16_t& sector, std::uint32_t offset,
-                                      std::uint32_t& total_bytes) {
+                                      std::uint32_t& total_bytes, bool& aborted) {
     bool send_failed = false;
 
     std::ifstream file(file_path, std::ios::binary);
@@ -230,6 +255,14 @@ bool sync_fw_updater::upload_transfer(const fs::path& file_path, std::uint16_t& 
 
     bool processed_file = filesystem_utils::process_file(
         file, sub_chunk_size, [&](const std::vector<std::uint8_t>& buffer, bool last_chunk) -> bool {
+            // Cancellation point of the whole upload: this loop runs for minutes, and the caller
+            // (shutdown) must not have to wait for it. Leaving without the finish packet keeps the
+            // device on its current firmware, so an aborted upload is just a failed upload.
+            if (is_abort_requested()) {
+                aborted = true;
+                return true; // Interrupt
+            }
+
             total_bytes += buffer.size();
 
             // Care must be taken when sending this over, since on the
@@ -249,7 +282,7 @@ bool sync_fw_updater::upload_transfer(const fs::path& file_path, std::uint16_t& 
             return false; // Continue
         });
 
-    return (processed_file) && (send_failed == false);
+    return (processed_file) && (send_failed == false) && (aborted == false);
 }
 
 bool sync_fw_updater::upload_finish([[maybe_unused]] const fs::path& file_path, std::uint32_t total_bytes,

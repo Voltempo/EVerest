@@ -529,12 +529,17 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
     }
 
     using clock = std::chrono::steady_clock;
-    auto action = [this](auto& status_handle, charge_bridge_status& current_status,
-                         std::optional<clock::time_point>& next_connect_retry_time, std::future<bool>& startup_runtime,
-                         bool& startup_runtime_in_progress,
-                         std::optional<clock::time_point>& discovery_attempt_deadline,
-                         std::optional<clock::time_point>& discovery_retry_time, std::future<bool>& stop_runtime,
-                         bool& runtime_stop_in_progress) {
+    auto action = [this, &run](auto& status_handle, charge_bridge_status& current_status,
+                               std::optional<clock::time_point>& next_connect_retry_time,
+                               std::future<bool>& startup_runtime, bool& startup_runtime_in_progress,
+                               std::optional<clock::time_point>& discovery_attempt_deadline,
+                               std::optional<clock::time_point>& discovery_retry_time, std::future<bool>& stop_runtime,
+                               bool& runtime_stop_in_progress) {
+        // Shutdown already requested: do not start anything new (a connection probe or a firmware
+        // upload would only delay the join in the destructor).
+        if (not run.load()) {
+            return;
+        }
         auto now = clock::now();
         if (runtime_stop_in_progress) {
             if (stop_runtime.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
@@ -625,13 +630,25 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
             // get_status() on the shared event-loop thread — and therefore every other bridge
             // instance — is not stalled for the duration. current_status stays valid; only the lock
             // is dropped and re-acquired.
+            //
+            // The run flag doubles as the upload's cancellation check: on SIGINT/SIGTERM (or 'q' in
+            // the terminal UI) the chunk loop stops within one chunk, the update is reported as
+            // failed, and this loop exits because run is false. Without it the manager join in
+            // ~charge_bridge would block until the flash completes.
+            //
+            // Exceptions are contained here instead of escaping the thread callable (which would call
+            // std::terminate() and take every other bridge down with it): this bridge simply stays
+            // disconnected and retries in the next manager cycle.
             status_handle.unlock();
             bool firmware_ok = false;
             try {
-                firmware_ok = update_firmware(m_force_firmware_update);
+                firmware_ok = update_firmware(m_force_firmware_update, [&run]() { return not run.load(); });
+            } catch (std::exception const& e) {
+                utilities::print_error(m_config.cb_name, "FIRMWARE", 1)
+                    << "Firmware update failed: " << e.what() << " (retrying in next cycle)" << std::endl;
             } catch (...) {
-                status_handle.lock();
-                throw;
+                utilities::print_error(m_config.cb_name, "FIRMWARE", 1)
+                    << "Firmware update failed with an unknown exception (retrying in next cycle)" << std::endl;
             }
             status_handle.lock();
             if (firmware_ok) {
@@ -734,8 +751,21 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
             return false;
         };
         while (run.load()) {
-            action(handle, *handle, next_connect_retry_time, startup_runtime, startup_runtime_in_progress,
-                   discovery_attempt_deadline, discovery_retry_time, stop_runtime, runtime_stop_in_progress);
+            // Safety net around the whole cycle: an exception leaving this thread callable would call
+            // std::terminate() and kill the process, so a failing cycle only degrades this bridge and
+            // is retried after the regular wait. Every path that temporarily releases the monitor lock
+            // re-acquires it before propagating (see update_firmware() above), so `handle` is locked
+            // here and the wait below stays valid.
+            try {
+                action(handle, *handle, next_connect_retry_time, startup_runtime, startup_runtime_in_progress,
+                       discovery_attempt_deadline, discovery_retry_time, stop_runtime, runtime_stop_in_progress);
+            } catch (std::exception const& e) {
+                utilities::print_error(m_config.cb_name, "MANAGER", 1)
+                    << "Manager cycle failed: " << e.what() << " (retrying in next cycle)" << std::endl;
+            } catch (...) {
+                utilities::print_error(m_config.cb_name, "MANAGER", 1)
+                    << "Manager cycle failed with an unknown exception (retrying in next cycle)" << std::endl;
+            }
             if (handle->discovery_pending && is_mdns_endpoint()) {
                 auto wait_timeout =
                     compute_wait_timeout(std::chrono::duration_cast<std::chrono::milliseconds>(manager_base_cycle));
@@ -756,8 +786,10 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
     });
 }
 
-bool charge_bridge::update_firmware(bool force) {
-    firmware_update::sync_fw_updater updater(m_config.firmware);
+bool charge_bridge::update_firmware(bool force, std::function<bool()> abort_requested) {
+    auto is_aborted = [&abort_requested]() { return abort_requested and abort_requested(); };
+
+    firmware_update::sync_fw_updater updater(m_config.firmware, abort_requested);
     auto is_connected = updater.quick_check_connection();
     if (not is_connected) {
         return false;
@@ -769,10 +801,18 @@ bool charge_bridge::update_firmware(bool force) {
     if (not do_update) {
         return true;
     }
+    // Never start a multi-minute flash when a shutdown is already pending.
+    if (is_aborted()) {
+        utilities::print_error(m_config.cb_name, "FIRMWARE", 1)
+            << "Firmware update skipped: shutdown requested" << std::endl;
+        return false;
+    }
     auto result = updater.upload_fw() && updater.check_connection();
     if (not result) {
         utilities::print_error(m_config.cb_name, "FIRMWARE", 1)
-            << "Could not install correct firmware version" << std::endl;
+            << (is_aborted() ? "Firmware update aborted: shutdown requested"
+                             : "Could not install correct firmware version")
+            << std::endl;
     }
     return result;
 }

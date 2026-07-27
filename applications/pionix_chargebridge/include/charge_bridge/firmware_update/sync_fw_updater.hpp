@@ -6,6 +6,7 @@
 #include <charge_bridge/utilities/sync_udp_client.hpp>
 
 #include <fstream>
+#include <functional>
 
 namespace charge_bridge::firmware_update {
 
@@ -19,7 +20,12 @@ struct fw_update_config {
 
 class sync_fw_updater {
 public:
-    sync_fw_updater(fw_update_config const& config);
+    /// @param abort_requested Optional cancellation check, polled before every firmware chunk is
+    /// sent. Returning true aborts the (potentially multi-minute) upload, so a shutdown does not have
+    /// to wait for the flash to complete. The abort is reported like any other upload failure; it
+    /// happens before the finish packet, so the device keeps running its previous firmware. Defaults
+    /// to an empty check, i.e. no cancellation at all.
+    sync_fw_updater(fw_update_config const& config, std::function<bool()> abort_requested = {});
     ~sync_fw_updater() = default;
 
     std::optional<std::string> get_fw_version();
@@ -35,13 +41,14 @@ public:
 
 private:
     bool check_reply(utilities::sync_udp_client::reply const& val);
+    bool is_abort_requested() const;
 
-    bool upload_firmware();
+    bool upload_firmware(bool& aborted);
 
     bool upload_init(const fs::path& file_path, std::uint32_t& offset,
                      charge_bridge::filesystem_utils::CryptSignedHeader& hdr);
     bool upload_transfer(const fs::path& file_path, std::uint16_t& sector, std::uint32_t offset,
-                         std::uint32_t& total_bytes);
+                         std::uint32_t& total_bytes, bool& aborted);
     bool upload_finish(const fs::path& file_path, std::uint32_t total_bytes,
                        const charge_bridge::filesystem_utils::CryptSignedHeader& hdr);
 
@@ -50,6 +57,7 @@ private:
 
     utilities::sync_udp_client m_udp;
     fw_update_config m_config;
+    std::function<bool()> m_abort_requested;
     static const std::uint32_t app_udp_sector_size;
     static const std::uint16_t sub_chunk_size;
 };
