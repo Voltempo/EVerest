@@ -132,6 +132,13 @@ private:
     utilities::chargebridge_status get_status();
 
 private:
+    // Declared before the bridges on purpose: every bridge holds a reference to m_ready_notify and the
+    // heartbeat callback touches m_cb_status, and members are destroyed in reverse declaration order.
+    // Keeping the notification primitives first makes them outlive the objects referencing them, so a
+    // bridge destructor (or a handler it runs while shutting down) can never see them destroyed.
+    everest::lib::io::event::event_fd m_ready_notify;
+    everest::lib::util::monitor<charge_bridge_status> m_cb_status;
+
     std::unique_ptr<can_bridge> m_can_0_client;
     std::unique_ptr<serial_bridge> m_pty_1;
     std::unique_ptr<serial_bridge> m_pty_2;
@@ -143,10 +150,8 @@ private:
     std::unique_ptr<discovery> m_discovery;
 
     everest::lib::io::event::fd_event_handler* m_event_handler{nullptr};
-    everest::lib::io::event::event_fd m_ready_notify;
     everest::lib::io::event::timer_fd m_1s_tick;
     bool m_force_firmware_update{false};
-    everest::lib::util::monitor<charge_bridge_status> m_cb_status;
     bool m_was_connected{false};
     bool m_discovery_active{false};
     bool m_internal_runtime_started{false};

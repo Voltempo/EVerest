@@ -71,6 +71,12 @@ private:
     void send_ws28_udp();
     void send_ws28_anim_udp();
 
+    // Declared before the UDP and MQTT clients: their handlers write these observables (via
+    // handle_ready()), and members are destroyed in reverse declaration order, so the observables have
+    // to outlive the clients whose teardown may still run a handler.
+    everest::lib::util::observable<bool> m_ready{false};
+    everest::lib::util::observable<bool> m_cb_is_connected{false};
+
     std::unique_ptr<everest::lib::io::udp::udp_client> m_udp;
     std::uint16_t m_udp_port{0};
     std::string m_udp_remote;
@@ -91,8 +97,6 @@ private:
     std::string m_send_topic;
     std::string m_adc_send_topic;
     std::string m_telemetry_send_topic;
-    everest::lib::util::observable<bool> m_ready{false};
-    everest::lib::util::observable<bool> m_cb_is_connected{false};
     io_state m_io_state;
     bool m_have_io{false};
     everest::lib::io::event::event_fd& m_ready_notify;
