@@ -16,6 +16,7 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/component_base.hpp>
 #include <ftxui/component/event.hpp>
+#include <ftxui/component/loop.hpp>
 #include <ftxui/component/mouse.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -251,6 +252,9 @@ void status_ui::run() {
         return;
     }
 
+    // Cleared before the loop thread exists so a previous stop() cannot abort the new loop.
+    m_stop_requested.store(false, std::memory_order_release);
+
     if (m_terminal_active()) {
         m_thread = std::thread(&status_ui::run_terminal_loop, this);
     } else {
@@ -261,14 +265,11 @@ void status_ui::run() {
 void status_ui::stop() {
     auto const was_running = m_running.exchange(false);
 
-    // Wake whichever loop is running.
+    // Wake whichever loop is running. The terminal loop re-reads m_stop_requested before it enters
+    // the ftxui loop and after every loop iteration, so it always observes the request and leaves on
+    // its own; we must not touch the ftxui screen from here (see status_ui.hpp).
+    m_stop_requested.store(true, std::memory_order_release);
     m_status_queue.stop();
-    {
-        std::scoped_lock lock(m_screen_mutex);
-        if (m_screen != nullptr) {
-            m_screen->Exit();
-        }
-    }
 
     if (was_running && m_thread.joinable()) {
         m_thread.join();
@@ -322,10 +323,10 @@ void status_ui::apply_log_message(std::string device, std::string message) {
 }
 
 void status_ui::request_redraw() {
-    std::scoped_lock lock(m_screen_mutex);
-    if (m_screen != nullptr) {
-        m_screen->PostEvent(ftxui::Event::Custom);
-    }
+    // Raise a flag only: the terminal loop thread owns the ftxui screen and turns this into a
+    // PostEvent() itself (see run_terminal_loop()). Updates arriving back-to-back - the per-instance
+    // 1 Hz status ticks and every captured diagnostic line - coalesce into a single repaint.
+    m_redraw_pending.store(true, std::memory_order_release);
 }
 
 void status_ui::run_log_loop() {
@@ -355,11 +356,12 @@ void status_ui::run_log_loop() {
 void status_ui::run_terminal_loop() {
     using namespace ftxui;
 
-    auto screen = ScreenInteractive::Fullscreen();
-    {
-        std::scoped_lock lock(m_screen_mutex);
-        m_screen = &screen;
+    // stop() may have run before this thread was scheduled; never grab the terminal in that case.
+    if (m_stop_requested.load(std::memory_order_acquire)) {
+        return;
     }
+
+    auto screen = ScreenInteractive::Fullscreen();
 
     // Plot-selection state, alive for the whole loop. plot_enabled[key] == true means the user
     // ticked that series for plotting. click_targets holds the on-screen boxes of the checkbox
@@ -836,17 +838,27 @@ void status_ui::run_terminal_loop() {
             return true;
         }
         if (event == Event::Character('q') || event == Event::Escape) {
+            // Runs on the loop thread, so tearing the screen down here cannot race with a publish:
+            // no other thread ever calls into `screen` (see status_ui.hpp).
             screen.Exit();
             return true;
         }
         return false;
     });
 
-    screen.Loop(root);
-
     {
-        std::scoped_lock lock(m_screen_mutex);
-        m_screen = nullptr;
+        // Drive the ftxui loop explicitly instead of screen.Loop(root) so that stop() requests and
+        // pending repaints are checked between iterations, on this thread. ftxui's animation listener
+        // posts a task roughly every 15 ms for as long as the screen is installed, so
+        // RunOnceBlocking() returns continuously and both flags are picked up within a frame.
+        // Destroying `loop` restores the terminal (PostMain/Uninstall) exactly like screen.Loop() did.
+        ftxui::Loop loop(&screen, root);
+        while (not m_stop_requested.load(std::memory_order_acquire) && not loop.HasQuitted()) {
+            loop.RunOnceBlocking();
+            if (m_redraw_pending.exchange(false, std::memory_order_acq_rel)) {
+                screen.PostEvent(Event::Custom);
+            }
+        }
     }
 
     // If the loop exited because the user quit (rather than stop() being called), notify the app.

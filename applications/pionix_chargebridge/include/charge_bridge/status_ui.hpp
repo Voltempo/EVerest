@@ -19,10 +19,6 @@
 #include <charge_bridge/utilities/print_status.hpp>
 #include <everest/util/queue/thread_safe_queue.hpp>
 
-namespace ftxui {
-class ScreenInteractive;
-} // namespace ftxui
-
 namespace charge_bridge {
 
 struct status_ui_options {
@@ -131,9 +127,13 @@ private:
     bool m_name_modal_open{false};
     std::string m_name_input_value;
 
-    // Screen pointer is valid only while the terminal loop runs; guarded for cross-thread access.
-    std::mutex m_screen_mutex;
-    ftxui::ScreenInteractive* m_screen{nullptr};
+    // The ftxui screen is created by, and only ever touched from, the terminal loop thread (see
+    // run_terminal_loop()). ftxui destroys the screen's task sender on that thread on every teardown
+    // path (Exit(), its own SIGINT/SIGTERM handler, Ctrl-Z suspend, loop shutdown), so calling
+    // Post()/PostEvent() from any other thread is a use-after-free during shutdown. Other threads
+    // therefore only raise these flags; the loop polls them between iterations and posts itself.
+    std::atomic_bool m_redraw_pending{false};
+    std::atomic_bool m_stop_requested{false};
 
     std::function<void()> m_quit_handler;
 
