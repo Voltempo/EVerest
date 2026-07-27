@@ -26,11 +26,12 @@ using namespace everest::lib::API;
 namespace charge_bridge::evse_bsp {
 
 namespace {
-// MREC23ProximityFault is reported by two independent sources: the safety flag 'pp_invalid'
-// (see error_specs) and the type 2 PP state machine (PpState_Type2_STATE_FAULT). Each source
-// uses its own sub_type, so that it owns exactly one error instance and cannot clear a fault
-// that is still active on the other source.
-constexpr auto pp_fault_subtype_flag = "PPINVALID";
+// The type 2 PP state machine (see handle_pp_type2) is the single owner of
+// MREC23ProximityFault. The safety flag 'pp_invalid' describes the same physical condition but
+// is reported as VendorError/PPINVALID instead of a second MREC23ProximityFault instance:
+// OCPP 2.0.1 reporting maps the error type to a techCode and drops the sub_type, so clearing
+// one instance would tell the CSMS that CX023 is gone while the other source is still faulted.
+constexpr auto pp_invalid_subtype = "PPINVALID";
 constexpr auto pp_fault_subtype_state = "PPSTATE";
 } // namespace
 
@@ -300,7 +301,7 @@ struct FlagSpec {
 };
 
 static constexpr FlagSpec error_specs[] = {
-    {SafetyErrorMask::pp_invalid, API_BSP::ErrorEnum::MREC23ProximityFault, pp_fault_subtype_flag, "PP invalid"},
+    {SafetyErrorMask::pp_invalid, API_BSP::ErrorEnum::VendorError, pp_invalid_subtype, "PP invalid"},
     {SafetyErrorMask::plug_temperature_too_high, API_BSP::ErrorEnum::MREC19CableOverTempStop, "",
      "Plug temperature too high"},
     {SafetyErrorMask::internal_temperature_too_high, API_BSP::ErrorEnum::VendorError, "INTTEMP",
