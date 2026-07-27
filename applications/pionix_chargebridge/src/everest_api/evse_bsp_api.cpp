@@ -25,6 +25,15 @@ using namespace everest::lib::API;
 
 namespace charge_bridge::evse_bsp {
 
+namespace {
+// MREC23ProximityFault is reported by two independent sources: the safety flag 'pp_invalid'
+// (see error_specs) and the type 2 PP state machine (PpState_Type2_STATE_FAULT). Each source
+// uses its own sub_type, so that it owns exactly one error instance and cannot clear a fault
+// that is still active on the other source.
+constexpr auto pp_fault_subtype_flag = "PPINVALID";
+constexpr auto pp_fault_subtype_state = "PPSTATE";
+} // namespace
+
 evse_bsp_api::evse_bsp_api(evse_bsp_config const& config, std::string const& cb_identifier,
                            evse_bsp_host_to_cb& host_status) :
     host_status(host_status), m_capabilities(config.capabilities), m_cb_identifier(cb_identifier) {
@@ -228,7 +237,8 @@ void evse_bsp_api::handle_pp_type2(std::uint8_t data) {
         // Raise error check state
         bc_ampacity_valid = false;
         if (not m_pp_fault_raised) {
-            send_raise_error(API_BSP::ErrorEnum::MREC23ProximityFault, "", "Proximity Pilot Fault State");
+            send_raise_error(API_BSP::ErrorEnum::MREC23ProximityFault, pp_fault_subtype_state,
+                             "Proximity Pilot Fault State");
             m_pp_fault_raised = true;
         }
         break;
@@ -238,7 +248,7 @@ void evse_bsp_api::handle_pp_type2(std::uint8_t data) {
     if (bc_ampacity_valid) {
         // Firmware reports a non-fault state again: clear a previously raised proximity fault
         if (m_pp_fault_raised) {
-            send_clear_error(API_BSP::ErrorEnum::MREC23ProximityFault, "", "");
+            send_clear_error(API_BSP::ErrorEnum::MREC23ProximityFault, pp_fault_subtype_state, "");
             m_pp_fault_raised = false;
         }
         send_ac_pp_amapcity(bc_ampacity);
@@ -285,7 +295,7 @@ struct FlagSpec {
 };
 
 static constexpr FlagSpec error_specs[] = {
-    {SafetyErrorMask::pp_invalid, API_BSP::ErrorEnum::MREC23ProximityFault, "", "PP invalid"},
+    {SafetyErrorMask::pp_invalid, API_BSP::ErrorEnum::MREC23ProximityFault, pp_fault_subtype_flag, "PP invalid"},
     {SafetyErrorMask::plug_temperature_too_high, API_BSP::ErrorEnum::MREC19CableOverTempStop, "",
      "Plug temperature too high"},
     {SafetyErrorMask::internal_temperature_too_high, API_BSP::ErrorEnum::VendorError, "INTTEMP",
@@ -314,11 +324,10 @@ static constexpr FlagSpec print_warning_specs[] = {
      "Allow power on from EVerest missing"},
 };
 
-// 4) Edge-driven handler
-void evse_bsp_api::handle_error(const SafetyErrorFlags& data) {
-    std::uint32_t prev = cb_status.error_flags.raw; // cached raw value from before
-    std::uint32_t next = data.raw;                  // current raw value
-
+// Raise/clear all errors whose flag changed between 'prev' and 'next'.
+// Passing prev = 0 turns every active flag into a rising edge and therefore re-raises all
+// currently active errors without clearing anything.
+void evse_bsp_api::publish_error_flag_edges(std::uint32_t prev, std::uint32_t next) {
     std::uint32_t became_active = next & ~prev;   // rising edges
     std::uint32_t became_inactive = prev & ~next; // falling edges
 
@@ -330,6 +339,13 @@ void evse_bsp_api::handle_error(const SafetyErrorFlags& data) {
             send_clear_error(s.error, s.subtype, "");
         }
     }
+}
+
+// 4) Edge-driven handler
+void evse_bsp_api::handle_error(const SafetyErrorFlags& data) {
+    std::uint32_t next = data.raw; // current raw value
+
+    publish_error_flag_edges(cb_status.error_flags.raw, next);
 
     std::stringstream log;
 
@@ -512,8 +528,13 @@ void evse_bsp_api::handle_everest_connection_state() {
         if (status) {
             utilities::print_error(m_cb_identifier, "EVSE/EVEREST", 0) << "EVerest connected" << std::endl;
             send_capabilities();
-            // A freshly (re)started EVerest lost any previously raised error: re-raise an
-            // active proximity fault instead of assuming it is still known.
+            // A freshly (re)started EVerest lost every error raised before it came up, while the
+            // MCU keeps its latched errors. Re-publish all currently active errors instead of
+            // assuming they are still known: all active safety flags (treating "nothing known
+            // before" as the previous state) plus an active proximity fault state.
+            // Raising an already active error is ignored by the EVerest error framework, so this
+            // is harmless if EVerest did not actually restart (e.g. a short heartbeat gap).
+            publish_error_flag_edges(0, cb_status.error_flags.raw);
             m_pp_fault_raised = false;
             handle_pp_type2(cb_status.pp_state_type2);
         } else {
