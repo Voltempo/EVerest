@@ -1,8 +1,13 @@
 cmake_minimum_required(VERSION 3.16)
 
+# MQTT support in everest::io is mandatory for this application. everest::io exports no property to
+# query it, so the cache variable (declared in the top level CMakeLists.txt, default ON) is the only
+# signal; if it is not defined at all, MQTT support is assumed to be present. As with ftxui below,
+# skip only this application instead of failing the whole project configuration.
 if(DEFINED EVEREST_IO_WITH_MQTT AND NOT EVEREST_IO_WITH_MQTT)
-    message(FATAL_ERROR "pionix_chargebridge requires MQTT support in everest::io. "
+    message(WARNING "Not building pionix_chargebridge because everest::io is built without MQTT support. "
             "Set EVEREST_IO_WITH_MQTT=ON or disable EVEREST_BUILD_APPLICATIONS.")
+    return()
 endif()
 
 # ftxui powers the interactive terminal status UI and is mandatory for this application. It is
