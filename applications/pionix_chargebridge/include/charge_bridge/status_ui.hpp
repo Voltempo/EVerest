@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <functional>
 #include <map>
@@ -96,6 +97,8 @@ private:
     // ftxui-based interactive terminal loop.
     void run_terminal_loop();
     void request_redraw();
+    // Wake the terminal loop out of its wait (redraw request, stop request).
+    void wake_terminal_loop();
 
     void apply_status_row(utilities::chargebridge_status const& status);
     void apply_log_message(std::string device, std::string message);
@@ -134,6 +137,15 @@ private:
     // therefore only raise these flags; the loop polls them between iterations and posts itself.
     std::atomic_bool m_redraw_pending{false};
     std::atomic_bool m_stop_requested{false};
+
+    // Wakeup owned by this class instead of relying on ftxui posting internal tasks: the terminal
+    // loop calls ftxui's non-blocking RunOnce() and then waits here for at most k_pump_interval, so
+    // it always makes progress even if a future ftxui release stops ticking its animation listener.
+    // Signalled (flag set under the mutex, then notified) by request_redraw() and stop().
+    static constexpr std::chrono::milliseconds k_pump_interval{30};
+    std::mutex m_wakeup_mutex;
+    std::condition_variable m_wakeup_cv;
+    bool m_wakeup_pending{false};
 
     std::function<void()> m_quit_handler;
 

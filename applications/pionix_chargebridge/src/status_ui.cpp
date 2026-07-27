@@ -19,6 +19,7 @@
 #include <ftxui/component/loop.hpp>
 #include <ftxui/component/mouse.hpp>
 #include <ftxui/component/screen_interactive.hpp>
+#include <ftxui/component/task.hpp>
 #include <ftxui/dom/elements.hpp>
 #include <ftxui/dom/table.hpp>
 #include <ftxui/screen/box.hpp>
@@ -270,6 +271,7 @@ void status_ui::stop() {
     // its own; we must not touch the ftxui screen from here (see status_ui.hpp).
     m_stop_requested.store(true, std::memory_order_release);
     m_status_queue.stop();
+    wake_terminal_loop();
 
     if (was_running && m_thread.joinable()) {
         m_thread.join();
@@ -327,6 +329,17 @@ void status_ui::request_redraw() {
     // PostEvent() itself (see run_terminal_loop()). Updates arriving back-to-back - the per-instance
     // 1 Hz status ticks and every captured diagnostic line - coalesce into a single repaint.
     m_redraw_pending.store(true, std::memory_order_release);
+    wake_terminal_loop();
+}
+
+void status_ui::wake_terminal_loop() {
+    // Set the predicate under the mutex before notifying so a wakeup can never be lost: the loop
+    // only ever waits while holding this mutex and re-checks the predicate.
+    {
+        std::scoped_lock lock(m_wakeup_mutex);
+        m_wakeup_pending = true;
+    }
+    m_wakeup_cv.notify_all();
 }
 
 void status_ui::run_log_loop() {
@@ -848,16 +861,30 @@ void status_ui::run_terminal_loop() {
 
     {
         // Drive the ftxui loop explicitly instead of screen.Loop(root) so that stop() requests and
-        // pending repaints are checked between iterations, on this thread. ftxui's animation listener
-        // posts a task roughly every 15 ms for as long as the screen is installed, so
-        // RunOnceBlocking() returns continuously and both flags are picked up within a frame.
+        // pending repaints are checked between iterations, on this thread. The pump's liveness is
+        // ours: RunOnce() only drains whatever is already queued (never blocks) and the wait below is
+        // bounded by k_pump_interval and cut short by request_redraw()/stop(), so no ftxui internal
+        // (its animation ticker in particular) has to fire for this loop to make progress.
+        // Terminal input still arrives through ftxui's event listener thread, which posts parsed
+        // events into the same task queue that RunOnce() drains, so a keypress during the wait is
+        // handled on the next tick.
         // Destroying `loop` restores the terminal (PostMain/Uninstall) exactly like screen.Loop() did.
         ftxui::Loop loop(&screen, root);
         while (not m_stop_requested.load(std::memory_order_acquire) && not loop.HasQuitted()) {
-            loop.RunOnceBlocking();
             if (m_redraw_pending.exchange(false, std::memory_order_acq_rel)) {
                 screen.PostEvent(Event::Custom);
             }
+            // Guarantee at least one task per iteration: ftxui runs its deferred signal handling
+            // (resize, suspend, its own SIGINT/SIGTERM exit) only while draining tasks. An empty
+            // animation task is the cheapest one - it is dropped unless an animation was requested.
+            screen.Post(AnimationTask{});
+            loop.RunOnce();
+
+            std::unique_lock lock(m_wakeup_mutex);
+            m_wakeup_cv.wait_for(lock, k_pump_interval, [this] {
+                return m_wakeup_pending || m_stop_requested.load(std::memory_order_acquire);
+            });
+            m_wakeup_pending = false;
         }
     }
 
