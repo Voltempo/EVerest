@@ -48,6 +48,27 @@ std::pair<bool, std::set<std::string>> make_interface_list(std::string const& st
 
 const int mqtt_reconnect_timeout_ms = 1000;
 
+// Releases a monitor handle for the duration of a blocking, self-contained operation and re-acquires
+// it on every exit path, including exception unwinding. The manager loop reads guarded state and
+// waits on the same handle, so leaving its scope with the lock released would mean calling wait_for()
+// on a non-owning lock - std::terminate. Consequences for the guarded scope: it must not touch the
+// guarded state, and it must not log. print_error() can throw (allocation), and that exception has to
+// leave the unlocked window before it reaches a handler that logs or reads the guarded status.
+template <class HandleT> class scoped_monitor_unlock {
+public:
+    explicit scoped_monitor_unlock(HandleT& handle) : m_handle(handle) {
+        m_handle.unlock();
+    }
+    ~scoped_monitor_unlock() {
+        m_handle.lock();
+    }
+    scoped_monitor_unlock(scoped_monitor_unlock const&) = delete;
+    scoped_monitor_unlock& operator=(scoped_monitor_unlock const&) = delete;
+
+private:
+    HandleT& m_handle;
+};
+
 // Runs one bridge constructor in isolation. Every bridge owns host-local devices whose creation can
 // fail on its own (the vcan device needs CAP_NET_ADMIN, a pty symlink needs a writable target, ...),
 // so such a failure must neither keep the remaining bridges from coming up nor escape to the caller:
@@ -720,18 +741,19 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
                 m_next_liveness_probe = now + manager_base_cycle;
                 // Blocking UDP request/reply with retries. Release the monitor across it exactly like
                 // update_firmware() below does, so get_status() on the event-loop thread - and with it
-                // every other bridge instance - is not stalled. Nothing inside the unlocked window
-                // touches guarded state, allocates or logs, so the lock is always re-acquired below.
-                status_handle.unlock();
+                // every other bridge instance - is not stalled. The guard re-acquires the lock on every
+                // exit path; nothing is logged before it does.
                 bool alive = false;
-                try {
-                    alive = probe_device_liveness([&run]() { return not run.load(); });
-                } catch (...) {
-                    // A probe that cannot even be sent counts as a failed probe; the reason is
-                    // reported by the reconnect path once the runtime has been torn down.
-                    alive = false;
+                {
+                    scoped_monitor_unlock unlocked(status_handle);
+                    try {
+                        alive = probe_device_liveness([&run]() { return not run.load(); });
+                    } catch (...) {
+                        // A probe that cannot even be sent counts as a failed probe; the reason is
+                        // reported by the reconnect path once the runtime has been torn down.
+                        alive = false;
+                    }
                 }
-                status_handle.lock();
 
                 if (not run.load()) {
                     // The probe was cancelled by a pending shutdown, so its result says nothing about
@@ -796,19 +818,25 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
             //
             // Exceptions are contained here instead of escaping the thread callable (which would call
             // std::terminate() and take every other bridge down with it): this bridge simply stays
-            // disconnected and retries in the next manager cycle.
-            status_handle.unlock();
+            // disconnected and retries in the next manager cycle. The failure is only formatted while
+            // the monitor is released and logged after the guard has re-acquired it - print_error() can
+            // throw, and doing that in the unlocked window would leave the loop below reading guarded
+            // state and waiting on a lock it does not own.
             bool firmware_ok = false;
-            try {
-                firmware_ok = update_firmware(m_force_firmware_update, [&run]() { return not run.load(); });
-            } catch (std::exception const& e) {
-                utilities::print_error(m_config.cb_name, "FIRMWARE", 1)
-                    << "Firmware update failed: " << e.what() << " (retrying in next cycle)" << std::endl;
-            } catch (...) {
-                utilities::print_error(m_config.cb_name, "FIRMWARE", 1)
-                    << "Firmware update failed with an unknown exception (retrying in next cycle)" << std::endl;
+            std::string firmware_error;
+            {
+                scoped_monitor_unlock unlocked(status_handle);
+                try {
+                    firmware_ok = update_firmware(m_force_firmware_update, [&run]() { return not run.load(); });
+                } catch (std::exception const& e) {
+                    firmware_error = std::string("Firmware update failed: ") + e.what() + " (retrying in next cycle)";
+                } catch (...) {
+                    firmware_error = "Firmware update failed with an unknown exception (retrying in next cycle)";
+                }
             }
-            status_handle.lock();
+            if (not firmware_error.empty()) {
+                utilities::print_error(m_config.cb_name, "FIRMWARE", 1) << firmware_error << std::endl;
+            }
             if (firmware_ok) {
                 if (not m_internal_runtime_started) {
                     startup_runtime = start_internal_runtime();
@@ -912,8 +940,8 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
             // Safety net around the whole cycle: an exception leaving this thread callable would call
             // std::terminate() and kill the process, so a failing cycle only degrades this bridge and
             // is retried after the regular wait. Every path that temporarily releases the monitor lock
-            // re-acquires it before propagating (see update_firmware() above), so `handle` is locked
-            // here and the wait below stays valid.
+            // does so through scoped_monitor_unlock, which re-acquires it on every exit path including
+            // exception unwinding, so `handle` is locked here and the wait below stays valid.
             try {
                 action(handle, *handle, next_connect_retry_time, startup_runtime, startup_runtime_in_progress,
                        discovery_attempt_deadline, discovery_retry_time, stop_runtime, runtime_stop_in_progress);
