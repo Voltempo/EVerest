@@ -50,6 +50,47 @@ static everest::lib::io::udp::udp_payload make_get_version_command() {
     return payload;
 }
 
+// UDP carries no request/reply correlation, so a reply is matched to its request by the
+// CbStructType tag and the shape of the payload. The shared protocol header has a dedicated
+// CST_CbFirmwareReply tag for replies but does not rule out firmware that echoes the request tag,
+// so both are accepted: the point is to reject datagrams belonging to a *different* request - a late
+// ping ACK arriving while the version reply is awaited, notably - not to enforce one convention.
+static bool has_reply_tag(udp_payload const& reply, CbStructType request) {
+    if (reply.buffer.size() < cb_header_size) {
+        return false;
+    }
+    std::uint16_t tag = 0;
+    std::memcpy(&tag, reply.buffer.data(), sizeof(tag));
+    auto const type = static_cast<CbStructType>(tag);
+    return (type == CbStructType::CST_CbFirmwareReply) or (type == request);
+}
+
+// True for the header plus a single AppUDPResponse, the shape every ping/start/chunk/finish request
+// is answered with. This is what tells a status reply from a version string in case both are tagged
+// CST_CbFirmwareReply.
+static bool is_app_udp_response(udp_payload const& reply) {
+    if (reply.buffer.size() != (cb_header_size + sizeof(AppUDPResponse))) {
+        return false;
+    }
+    AppUDPResponse response{};
+    std::memcpy(&response, reply.buffer.data() + cb_header_size, sizeof(response));
+    return (response == AppUDPResponse::AUR_Ok) or (response == AppUDPResponse::AUR_Bad);
+}
+
+// Reply filter for the requests answered with a status only: ping, upload start, chunk, finish.
+static utilities::sync_udp_client::reply_filter status_reply_filter(CbStructType request) {
+    return [request](udp_payload const& reply) { return has_reply_tag(reply, request) and is_app_udp_response(reply); };
+}
+
+// Reply filter for the version probe: a version string is never an AppUDPResponse, so a status reply
+// left over from an earlier request cannot be handed out as a firmware version.
+static utilities::sync_udp_client::reply_filter version_reply_filter() {
+    return [](udp_payload const& reply) {
+        return has_reply_tag(reply, CbStructType::CST_CbFirmwareGetVersion) and
+               (reply.buffer.size() >= min_version_reply_size) and not is_app_udp_response(reply);
+    };
+}
+
 sync_fw_updater::sync_fw_updater(fw_update_config const& config, std::function<bool()> abort_requested) :
     m_udp(config.cb_remote, config.cb_port, 3, default_udp_timeout_ms),
     m_config(config),
@@ -63,7 +104,7 @@ bool sync_fw_updater::is_abort_requested() const {
 std::optional<std::string> sync_fw_updater::get_fw_version() {
     auto pl = make_get_version_command();
 
-    auto result = m_udp.request_reply(pl, m_abort_requested);
+    auto result = m_udp.request_reply(pl, m_abort_requested, version_reply_filter());
     if (not result) {
         return std::nullopt;
     }
@@ -124,7 +165,8 @@ bool sync_fw_updater::quick_check_connection() {
     static const std::uint16_t rr_retires_ms = 10;
 
     everest::lib::io::udp::udp_payload pl = make_ping_command();
-    auto result = m_udp.request_reply(pl, rr_timeout_ms, rr_retires_ms, m_abort_requested).has_value();
+    auto const accept_reply = status_reply_filter(CbStructType::CST_CbFirmwarePing);
+    auto result = m_udp.request_reply(pl, rr_timeout_ms, rr_retires_ms, m_abort_requested, accept_reply).has_value();
     utilities::print_error(m_config.cb, "FIRMWARE", not result) << connection_result_message(result) << std::endl;
     return result;
 }
@@ -134,7 +176,8 @@ bool sync_fw_updater::check_connection() {
     static const std::uint16_t rr_retires_ms = 100;
 
     everest::lib::io::udp::udp_payload pl = make_ping_command();
-    auto result = m_udp.request_reply(pl, rr_timeout_ms, rr_retires_ms, m_abort_requested).has_value();
+    auto const accept_reply = status_reply_filter(CbStructType::CST_CbFirmwarePing);
+    auto result = m_udp.request_reply(pl, rr_timeout_ms, rr_retires_ms, m_abort_requested, accept_reply).has_value();
     utilities::print_error(m_config.cb, "FIRMWARE", not result) << connection_result_message(result) << std::endl;
     return result;
 }
@@ -152,7 +195,8 @@ std::string sync_fw_updater::connection_result_message(bool connected) const {
 bool sync_fw_updater::ping() {
     everest::lib::io::udp::udp_payload pl = make_ping_command();
 
-    return m_udp.request_reply(pl, m_abort_requested).has_value();
+    auto const accept_reply = status_reply_filter(CbStructType::CST_CbFirmwarePing);
+    return m_udp.request_reply(pl, m_abort_requested, accept_reply).has_value();
 }
 
 bool sync_fw_updater::check_reply(utilities::sync_udp_client::reply const& val) {
@@ -263,7 +307,8 @@ bool sync_fw_updater::upload_init(const fs::path& file_path, std::uint32_t& offs
     std::memcpy(msg.data.iv, hdr.iv.data(), sizeof(msg.data.iv));
 
     utilities::struct_to_vector(msg, payload.buffer);
-    auto result = m_udp.request_reply(payload, m_abort_requested);
+    auto result =
+        m_udp.request_reply(payload, m_abort_requested, status_reply_filter(CbStructType::CST_CbFirmwareStart));
 
     return check_reply(result);
 }
@@ -281,6 +326,11 @@ bool sync_fw_updater::upload_transfer(const fs::path& file_path, std::uint16_t& 
     // Skip the header
     file.seekg(offset, std::ios::beg);
 
+    // One filter for the whole transfer: every chunk is answered with the same status shape. Note
+    // that consecutive chunk replies are indistinguishable on the wire (the protocol echoes no
+    // sector), so this rejects foreign datagrams but cannot detect a duplicated chunk ACK.
+    auto const accept_reply = status_reply_filter(CbStructType::CST_CbFirmwarePacket);
+
     bool processed_file = filesystem_utils::process_file(
         file, sub_chunk_size, [&](const std::vector<std::uint8_t>& buffer, bool last_chunk) -> bool {
             // Cancellation point of the whole upload: this loop runs for minutes, and the caller
@@ -296,7 +346,7 @@ bool sync_fw_updater::upload_transfer(const fs::path& file_path, std::uint16_t& 
             // Care must be taken when sending this over, since on the
             // receiving end we must remove the PKCS#7 added bytes
             auto block = make_fw_chunk(sector, last_chunk, buffer);
-            auto result = m_udp.request_reply(block, m_abort_requested);
+            auto result = m_udp.request_reply(block, m_abort_requested, accept_reply);
 
             if (not check_reply(result)) {
                 // A chunk whose retries were cut short by the abort check is a cancellation, not a
@@ -341,7 +391,8 @@ bool sync_fw_updater::upload_finish([[maybe_unused]] const fs::path& file_path, 
     // finish handshake would leave it with a half-committed update (see upload_firmware()).
     static const std::uint16_t rr_timeout_ms = 10000;
     static const std::uint16_t rr_retires_ms = 1;
-    auto result = m_udp.request_reply(payload, rr_timeout_ms, rr_retires_ms);
+    auto result = m_udp.request_reply(payload, rr_timeout_ms, rr_retires_ms, {},
+                                      status_reply_filter(CbStructType::CST_CbFirmwareFinish));
 
     return check_reply(result);
 }

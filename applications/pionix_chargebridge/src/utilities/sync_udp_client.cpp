@@ -2,6 +2,7 @@
 // Copyright 2020 - 2025 Pionix GmbH and Contributors to EVerest
 #include "everest/io/event/fd_event_handler.hpp"
 #include <algorithm>
+#include <charge_bridge/utilities/logging.hpp>
 #include <charge_bridge/utilities/sync_udp_client.hpp>
 #include <chrono>
 #include <optional>
@@ -33,51 +34,74 @@ void sync_udp_client::init(std::string const& remote, std::uint16_t port) {
         m_udp.get_fd(), [this](auto) {}, everest::lib::io::event::poll_events::read);
 }
 
-reply sync_udp_client::request_reply(udp_payload const& payload, abort_check const& abort_requested) {
-    return request_reply(payload, m_timeout_ms, m_retries, abort_requested);
+reply sync_udp_client::request_reply(udp_payload const& payload, abort_check const& abort_requested,
+                                     reply_filter const& accept_reply) {
+    return request_reply(payload, m_timeout_ms, m_retries, abort_requested, accept_reply);
 }
 
 reply sync_udp_client::request_reply(udp_payload const& payload, std::uint16_t timeout_ms, std::uint16_t retries,
-                                     abort_check const& abort_requested) {
+                                     abort_check const& abort_requested, reply_filter const& accept_reply) {
     auto const aborted = [&abort_requested]() { return abort_requested and abort_requested(); };
 
-    udp_payload result;
     clear_socket();
     if (aborted() or not m_udp.tx(payload)) {
         return std::nullopt;
     }
     for (std::uint16_t i = 0; i < retries; ++i) {
-        if (not poll_for_reply(std::chrono::milliseconds(timeout_ms), abort_requested)) {
-            // No reply within the timeout, or the abort check fired while waiting. Only a plain
-            // timeout deserves another attempt; a cancelled request reports a missing reply.
-            if (aborted() or not m_udp.tx(payload)) {
-                return std::nullopt;
-            }
-            continue;
+        bool socket_failed = false;
+        auto result =
+            wait_for_reply(std::chrono::milliseconds(timeout_ms), abort_requested, accept_reply, socket_failed);
+        if (result) {
+            return result;
         }
-        if (not m_udp.rx(result)) {
+        if (socket_failed) {
             return std::nullopt;
         }
-        return result;
+        // No reply within the timeout, or the abort check fired while waiting. Only a plain
+        // timeout deserves another attempt; a cancelled request reports a missing reply.
+        if (aborted() or not m_udp.tx(payload)) {
+            return std::nullopt;
+        }
     }
     return std::nullopt;
 }
 
-bool sync_udp_client::poll_for_reply(std::chrono::milliseconds timeout, abort_check const& abort_requested) {
-    if (not abort_requested or timeout <= 0ms) {
-        return m_handler.poll(timeout);
-    }
+reply sync_udp_client::wait_for_reply(std::chrono::milliseconds timeout, abort_check const& abort_requested,
+                                      reply_filter const& accept_reply, bool& socket_failed) {
     auto const deadline = std::chrono::steady_clock::now() + timeout;
+    udp_payload result;
+    while (poll_for_reply(deadline, abort_requested)) {
+        if (not m_udp.rx(result)) {
+            socket_failed = true;
+            return std::nullopt;
+        }
+        if (not accept_reply or accept_reply(result)) {
+            return result;
+        }
+        // Not an answer to this request: a late reply to a previous one, or a foreign datagram - UDP
+        // carries no correlation of its own. Handing it out would make the caller parse it as this
+        // request's reply, so it is dropped and the wait resumes on the same deadline, leaving both
+        // the timeout and the retry budget untouched.
+        print_info("", "UDP") << "discarded unexpected reply of " << result.size() << " bytes" << std::endl;
+    }
+    return std::nullopt;
+}
+
+bool sync_udp_client::poll_for_reply(std::chrono::steady_clock::time_point const& deadline,
+                                     abort_check const& abort_requested) {
     while (true) {
-        auto const remaining =
+        auto remaining =
             std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
-        if (remaining <= 0ms) {
-            return false;
+        if (remaining < 0ms) {
+            remaining = 0ms;
+        }
+        if (not abort_requested) {
+            return m_handler.poll(remaining);
         }
         if (m_handler.poll(std::min(remaining, poll_slice))) {
             return true;
         }
-        if (abort_requested()) {
+        if (remaining == 0ms or abort_requested()) {
             return false;
         }
     }
