@@ -49,7 +49,9 @@ private:
     reply wait_for_reply(std::chrono::milliseconds timeout, abort_check const& abort_requested,
                          reply_filter const& accept_reply, bool& socket_failed);
     /// Wait for readability until \p deadline. With an armed \p abort_requested the wait is sliced,
-    /// so the check runs regularly instead of only after the full timeout has elapsed.
+    /// so the check runs regularly instead of only after the full timeout has elapsed. Returns false
+    /// once the deadline has passed or the abort check fired, even if the socket has data queued -
+    /// that is what bounds the caller's discard loop when datagrams keep arriving.
     bool poll_for_reply(std::chrono::steady_clock::time_point const& deadline, abort_check const& abort_requested);
 
     std::uint16_t m_retries;

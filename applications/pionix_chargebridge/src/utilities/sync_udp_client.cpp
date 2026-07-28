@@ -70,39 +70,56 @@ reply sync_udp_client::wait_for_reply(std::chrono::milliseconds timeout, abort_c
                                       reply_filter const& accept_reply, bool& socket_failed) {
     auto const deadline = std::chrono::steady_clock::now() + timeout;
     udp_payload result;
+    std::size_t discarded = 0;
+    // One line per request instead of one per drop: a sender flooding the socket produces tens of
+    // thousands of rejected datagrams per second, and logging each of them is the more expensive
+    // half of that problem.
+    auto const report_discards = [&discarded]() {
+        if (discarded > 0) {
+            print_info("", "UDP") << "discarded " << discarded << " unexpected datagram(s) while waiting for a reply"
+                                  << std::endl;
+        }
+    };
     while (poll_for_reply(deadline, abort_requested)) {
         if (not m_udp.rx(result)) {
             socket_failed = true;
+            report_discards();
             return std::nullopt;
         }
         if (not accept_reply or accept_reply(result)) {
+            report_discards();
             return result;
         }
         // Not an answer to this request: a late reply to a previous one, or a foreign datagram - UDP
         // carries no correlation of its own. Handing it out would make the caller parse it as this
         // request's reply, so it is dropped and the wait resumes on the same deadline, leaving both
-        // the timeout and the retry budget untouched.
-        print_info("", "UDP") << "discarded unexpected reply of " << result.size() << " bytes" << std::endl;
+        // the timeout and the retry budget untouched. poll_for_reply() re-evaluates the deadline and
+        // the abort check before every pass, so a continuous stream of rejected datagrams cannot
+        // keep this loop - and with it the caller's thread - alive past the timeout.
+        ++discarded;
     }
+    report_discards();
     return std::nullopt;
 }
 
 bool sync_udp_client::poll_for_reply(std::chrono::steady_clock::time_point const& deadline,
                                      abort_check const& abort_requested) {
+    auto const aborted = [&abort_requested]() { return abort_requested and abort_requested(); };
     while (true) {
-        auto remaining =
+        auto const remaining =
             std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
-        if (remaining < 0ms) {
-            remaining = 0ms;
+        // The deadline and the abort check are evaluated before the readiness test, not only after a
+        // poll timed out: poll(0ms) keeps reporting readiness while datagrams are queued, so asking
+        // the socket first would let the caller's discard loop run past the deadline - and never
+        // reach a cancellation check - for as long as a sender keeps the queue non-empty.
+        if (remaining <= 0ms or aborted()) {
+            return false;
         }
         if (not abort_requested) {
             return m_handler.poll(remaining);
         }
         if (m_handler.poll(std::min(remaining, poll_slice))) {
             return true;
-        }
-        if (remaining == 0ms or abort_requested()) {
-            return false;
         }
     }
 }
