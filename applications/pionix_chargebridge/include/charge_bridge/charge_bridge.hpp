@@ -134,12 +134,26 @@ private:
     utilities::chargebridge_status get_status();
 
 private:
-    // Declared before the bridges on purpose: every bridge holds a reference to m_ready_notify and the
-    // heartbeat callback touches m_cb_status, and members are destroyed in reverse declaration order.
-    // Keeping the notification primitives first makes them outlive the objects referencing them, so a
-    // bridge destructor (or a handler it runs while shutting down) can never see them destroyed.
+    // Everything the bridges and the handlers of this class touch is declared before the bridges on
+    // purpose: every bridge holds a reference to m_ready_notify, the heartbeat callback touches
+    // m_cb_status, and the tick handler reads m_config and publishes through m_mqtt and the sinks.
+    // Members are destroyed in reverse declaration order, so keeping these first makes them outlive the
+    // bridges: a bridge destructor - or a handler it still runs while shutting down - can never see
+    // them destroyed. Nothing here may depend on a bridge in turn.
     everest::lib::io::event::event_fd m_ready_notify;
     everest::lib::util::monitor<charge_bridge_status> m_cb_status;
+    everest::lib::io::event::timer_fd m_1s_tick;
+    // Ownership: written only by the event loop thread, in handle_discovery(), which fills in the
+    // address mDNS discovery found. Read by that same thread (get_status(), publish_status()) without
+    // any synchronisation - it is the writer - and by the manager thread, which may only read it while
+    // charge_bridge_status::discovery_pending is false. The mutex handshake around discovery_pending
+    // (set to false by the same action that finishes the discovery, read under the monitor by the
+    // manager loop) is what publishes the writes to the manager thread. The optionals' has_value()
+    // state and every field except the cb_remote strings are set in the constructor and then const.
+    charge_bridge_config m_config;
+    std::function<void(utilities::chargebridge_status)> m_status_sink;
+    std::function<void(utilities::chargebridge_status)> m_tick_sink;
+    std::unique_ptr<everest::lib::io::mqtt::mqtt_client> m_mqtt;
 
     std::unique_ptr<can_bridge> m_can_0_client;
     std::unique_ptr<serial_bridge> m_pty_1;
@@ -152,7 +166,6 @@ private:
     std::unique_ptr<discovery> m_discovery;
 
     everest::lib::io::event::fd_event_handler* m_event_handler{nullptr};
-    everest::lib::io::event::timer_fd m_1s_tick;
     bool m_force_firmware_update{false};
     bool m_was_connected{false};
     bool m_discovery_active{false};
@@ -180,11 +193,6 @@ private:
     // Network identity of the discovered endpoint (hostname, service instance, TXT records). Empty
     // for fixed-IP configs (no mDNS discovery); the IP itself always lives in m_config.cb_remote.
     std::optional<everest::lib::io::mdns::mDNS_discovery> m_discovery_info;
-    std::function<void(utilities::chargebridge_status)> m_status_sink;
-    std::function<void(utilities::chargebridge_status)> m_tick_sink;
-
-    charge_bridge_config m_config;
-    std::unique_ptr<everest::lib::io::mqtt::mqtt_client> m_mqtt;
 };
 
 } // namespace charge_bridge

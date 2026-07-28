@@ -72,10 +72,17 @@ private:
     void send_ws28_anim_udp();
 
     // Declared before the UDP and MQTT clients: their handlers write these observables (via
-    // handle_ready()), and members are destroyed in reverse declaration order, so the observables have
-    // to outlive the clients whose teardown may still run a handler.
+    // handle_ready()) and the decoded state below, and members are destroyed in reverse declaration
+    // order, so all of it has to outlive the clients whose teardown may still run a handler.
     everest::lib::util::observable<bool> m_ready{false};
     everest::lib::util::observable<bool> m_cb_is_connected{false};
+    // Latest decoded IO packet, written by the UDP receive handler and read by latest_io().
+    io_state m_io_state;
+    bool m_have_io{false};
+    // Reassembly buffer for the MCU debug-UART byte stream (CST_CbToHost_DebugUart). Chunks arrive
+    // split at arbitrary byte boundaries, so we accumulate and emit one log entry per '\n'. Written by
+    // the UDP receive handler as well.
+    std::string m_mcu_log_partial;
 
     std::unique_ptr<everest::lib::io::udp::udp_client> m_udp;
     std::uint16_t m_udp_port{0};
@@ -97,13 +104,7 @@ private:
     std::string m_send_topic;
     std::string m_adc_send_topic;
     std::string m_telemetry_send_topic;
-    io_state m_io_state;
-    bool m_have_io{false};
     everest::lib::io::event::event_fd& m_ready_notify;
-
-    // Reassembly buffer for the MCU debug-UART byte stream (CST_CbToHost_DebugUart). Chunks arrive
-    // split at arbitrary byte boundaries, so we accumulate and emit one log entry per '\n'.
-    std::string m_mcu_log_partial;
 };
 
 } // namespace charge_bridge

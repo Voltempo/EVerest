@@ -51,9 +51,20 @@ const int mqtt_reconnect_timeout_ms = 1000;
 // Releases a monitor handle for the duration of a blocking, self-contained operation and re-acquires
 // it on every exit path, including exception unwinding. The manager loop reads guarded state and
 // waits on the same handle, so leaving its scope with the lock released would mean calling wait_for()
-// on a non-owning lock - std::terminate. Consequences for the guarded scope: it must not touch the
-// guarded state, and it must not log. print_error() can throw (allocation), and that exception has to
-// leave the unlocked window before it reaches a handler that logs or reads the guarded status.
+// on a non-owning lock - std::terminate.
+//
+// The invariant covers the whole unlocked window, not just the statement that blocks: no code that
+// runs inside it - the operation itself, any callback it invokes and any exception handler that runs
+// before the scope is left - may touch the guarded state or log. Reading the state without the lock
+// is a data race, and logging takes the output lock, which must never be acquired from an unlocked
+// window whose reacquisition of the monitor would then invert the lock order. In particular
+// print_error() can throw (allocation), so an exception raised inside the window must be carried out
+// of this scope before it is reported: catch it here, format it, and log only after the guard has
+// re-acquired the monitor (see the firmware-update and liveness-probe call sites).
+//
+// The destructor relocks and is implicitly noexcept, so a throwing lock() (a mutex error) terminates
+// the process. That is deliberate: the alternative is to continue with a handle that does not own its
+// lock, which terminates in the wait_for() above anyway, after racy reads of the guarded state.
 template <class HandleT> class scoped_monitor_unlock {
 public:
     explicit scoped_monitor_unlock(HandleT& handle) : m_handle(handle) {
@@ -156,7 +167,8 @@ endpoint_intent_info parse_endpoint_intent(std::string const& cb_remote) {
 charge_bridge::charge_bridge(charge_bridge_config const& config,
                              std::function<void(utilities::chargebridge_status)> status_sink,
                              std::function<void(utilities::chargebridge_status)> tick_sink) :
-    m_status_sink(std::move(status_sink)), m_tick_sink(std::move(tick_sink)), m_config(config) {
+    // Order matches the declaration order in the header (see the member-lifetime comment there).
+    m_config(config), m_status_sink(std::move(status_sink)), m_tick_sink(std::move(tick_sink)) {
     m_endpoint_intent = parse_endpoint_intent(config.cb_remote);
 }
 
