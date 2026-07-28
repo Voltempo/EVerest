@@ -830,8 +830,19 @@ void status_ui::run_terminal_loop() {
         split_state.applied = split_state.render;
     };
 
+    // The instance list panel has the same problem horizontally: it keeps its 72 columns in a narrower
+    // terminal, leaving the detail panel 6 unreadable columns at 80x24. Leave the detail panel a usable
+    // minimum - but never take more than half of the width from the list, so a narrow terminal splits
+    // the difference instead of collapsing the list. Same per-frame copy, so a wider terminal restores
+    // the full list width (or a dragged one).
+    constexpr int k_list_panel_min = 20;   // instance name column + window borders
+    constexpr int k_detail_panel_min = 40; // widest detail label plus its value
+
     auto app = Renderer(split, [&] {
-        clamp_split(m_msg_split, k_msg_panel_min, ftxui::Terminal::Size().dimy / 2);
+        auto const terminal = ftxui::Terminal::Size();
+        clamp_split(m_msg_split, k_msg_panel_min, terminal.dimy / 2);
+        clamp_split(m_list_split, k_list_panel_min,
+                    terminal.dimx - std::min(k_detail_panel_min, std::max(0, terminal.dimx / 2)));
         return vbox({
             text("PIONIX ChargeBridge") | bold | hcenter,
             text("[ click/↑↓ select   wheel scroll   drag borders to resize   n set name   f filter log   q "
