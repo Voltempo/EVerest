@@ -13,7 +13,13 @@
 
 namespace {
 const int default_udp_timeout_ms = 3000;
-}
+// Every CB management packet starts with the CbStructType tag, the payload follows it.
+const std::size_t cb_header_size = sizeof(CbStructType);
+// A version reply is the header followed by a NUL terminated string, so the shortest reply that
+// carries a version at all is the header plus the terminator. Anything shorter - including the
+// empty buffer an empty datagram produces - has nothing to parse.
+const std::size_t min_version_reply_size = cb_header_size + 1;
+} // namespace
 
 namespace charge_bridge::firmware_update {
 
@@ -62,9 +68,20 @@ std::optional<std::string> sync_fw_updater::get_fw_version() {
         return std::nullopt;
     }
 
-    result->buffer[result->buffer.size() - 1] = 0x00;               // ensure it is actually a 0 terminated string
-    auto* str_ptr = reinterpret_cast<char*>(result->buffer.data()); // reinterpret for string conversion
-    return std::string(str_ptr + 2);                                // skip 2 byte header
+    if (result->buffer.size() < min_version_reply_size) {
+        // Short or empty datagram from the CB endpoint (a resetting MCU, or a foreign sender - this
+        // is UDP): there is no version string in it, so this is a failed probe, not a version.
+        return std::nullopt;
+    }
+
+    // Reinterpret for string conversion, skipping the header.
+    auto const* str_ptr = reinterpret_cast<char const*>(result->buffer.data()) + cb_header_size;
+    auto const available = result->buffer.size() - cb_header_size;
+    // The reply is not guaranteed to be 0 terminated, so bound the string by what was received
+    // instead of writing a terminator into the buffer.
+    auto const* terminator = static_cast<char const*>(std::memchr(str_ptr, '\0', available));
+    auto const length = (terminator != nullptr) ? static_cast<std::size_t>(terminator - str_ptr) : available;
+    return std::string(str_ptr, length);
 }
 
 void sync_fw_updater::print_fw_version() {
