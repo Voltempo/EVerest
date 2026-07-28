@@ -65,12 +65,15 @@ const int mqtt_reconnect_timeout_ms = 1000;
 //
 // The invariant covers the whole unlocked window, not just the statement that blocks: no code that
 // runs inside it - the operation itself, any callback it invokes and any exception handler that runs
-// before the scope is left - may touch the guarded state or log. Reading the state without the lock
-// is a data race, and logging takes the output lock, which must never be acquired from an unlocked
-// window whose reacquisition of the monitor would then invert the lock order. In particular
-// print_error() can throw (allocation), so an exception raised inside the window must be carried out
-// of this scope before it is reported: catch it here, format it, and log only after the guard has
-// re-acquired the monitor (see the firmware-update and liveness-probe call sites).
+// before the scope is left - may touch the guarded state, because reading or writing it without the
+// lock is a data race.
+//
+// Logging from inside the window is fine, and the named call sites do it extensively (update_firmware()
+// reports its whole progress from in there): the output sink takes its own lock and releases it again
+// before returning, so that lock is never held while this guard re-acquires the monitor and no lock
+// order can be inverted. The firmware-update and liveness-probe call sites still catch an exception
+// inside the window, carry the message out and report it after the monitor is back - that keeps the
+// report next to the state updates it belongs to, but it is not something this guard requires.
 //
 // The destructor relocks and is implicitly noexcept, so a throwing lock() (a mutex error) terminates
 // the process. That is deliberate: the alternative is to continue with a handle that does not own its
@@ -596,6 +599,20 @@ void charge_bridge::retry_missing_bridges() {
         // heartbeat service is missing, and this retry only runs for a started runtime. Kept so the
         // list stays exhaustive if that ever changes.
         activate(missing_heartbeat, m_heartbeat, m_config.heartbeat, "heartbeat service");
+
+        // A bridge created here missed every set_bridges_cb_connection_status() that ran while it did
+        // not exist, and nothing repeats that call for it: on a config without a heartbeat block the
+        // state is published once per connection edge, so a late can/plc/io bridge would report
+        // available() == false for the rest of the session. (Heartbeat configs heal themselves only
+        // because the heartbeat republishes the state on every tick.) Apply the current state the way
+        // heartbeat_cb does: read it under the monitor, then publish to the bridges with the lock
+        // released - the observables belong to this thread, the flag belongs to the monitor.
+        bool connected = false;
+        {
+            auto handle = m_cb_status.handle();
+            connected = handle->is_connected;
+        }
+        set_bridges_cb_connection_status(connected);
     });
 }
 
