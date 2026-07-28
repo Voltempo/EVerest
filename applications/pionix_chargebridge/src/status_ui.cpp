@@ -801,13 +801,14 @@ void status_ui::run_terminal_loop() {
             detail_scroller->Render() | flex,
         });
     });
-    auto split = ResizableSplitLeft(list_panel, detail_panel, &m_list_split_size);
+    auto split = ResizableSplitLeft(list_panel, detail_panel, &m_list_split.render);
 
     // The message panel is always present (status_message_lines is clamped to >= 1 in terminal mode)
     // so no diagnostic can end up invisible; it can still be shrunk by dragging its border.
     constexpr int k_msg_panel_min = 3; // border + one message line
-    m_msg_split_size = std::max(k_msg_panel_min, static_cast<int>(m_options.status_message_lines) + 2);
-    split = ResizableSplitBottom(Scroller(messages, /*stick_to_bottom=*/true), split, &m_msg_split_size);
+    const int msg_split_requested = std::max(k_msg_panel_min, static_cast<int>(m_options.status_message_lines) + 2);
+    m_msg_split = {msg_split_requested, msg_split_requested, msg_split_requested};
+    split = ResizableSplitBottom(Scroller(messages, /*stick_to_bottom=*/true), split, &m_msg_split.render);
 
     // ftxui's resizable split does not bound the panel it is given, so --status-message-lines=1000
     // (the documented maximum) leaves the dashboard zero rows - and so does dragging the border to the
@@ -815,13 +816,22 @@ void status_ui::run_terminal_loop() {
     // terminal resizes stay inside the same bound; the message panel scrolls, so a value larger than
     // the visible half only hides the dashboard instead of showing more (use --status-output=log for
     // full-screen diagnostics). The 1000-entry scrollback buffer is unaffected.
-    auto clamp_msg_split = [&] {
-        const int max_size = std::max(k_msg_panel_min, ftxui::Terminal::Size().dimy / 2);
-        m_msg_split_size = std::clamp(m_msg_split_size, k_msg_panel_min, max_size);
+    //
+    // Only the copy ftxui renders from is clamped (split_size, see status_ui.hpp): clamping the
+    // requested size in place would let one transient 24-row terminal permanently throw away
+    // --status-message-lines=40. A drag is the user changing the request, so it is adopted as such
+    // (and sticks even while it cannot be honoured); growing the terminal again restores the
+    // requested size, or the new maximum if that is smaller.
+    auto clamp_split = [](split_size& split_state, int min_size, int max_size) {
+        if (split_state.render != split_state.applied) {
+            split_state.requested = split_state.render;
+        }
+        split_state.render = std::clamp(split_state.requested, min_size, std::max(min_size, max_size));
+        split_state.applied = split_state.render;
     };
 
     auto app = Renderer(split, [&] {
-        clamp_msg_split();
+        clamp_split(m_msg_split, k_msg_panel_min, ftxui::Terminal::Size().dimy / 2);
         return vbox({
             text("PIONIX ChargeBridge") | bold | hcenter,
             text("[ click/↑↓ select   wheel scroll   drag borders to resize   n set name   f filter log   q "

@@ -123,8 +123,21 @@ private:
     // Terminal UI navigation state; only touched on the ftxui loop thread.
     int m_selected_row{0};             // index into m_status_rows / m_cb_names (bound to the Menu)
     bool m_log_filter_selected{false}; // when true, show only the selected instance's messages
-    int m_list_split_size{72};         // width of the instance list panel (mouse-draggable)
-    int m_msg_split_size{12};          // height of the message panel (mouse-draggable)
+
+    // Size of one mouse-draggable split panel. ftxui renders from - and while dragging writes into -
+    // the single int it is handed, so the size the user asked for is kept separately: `render` is
+    // re-derived from `requested` every frame and clamped against the current terminal size, and a
+    // value ftxui wrote into it is adopted as the new request. Clamping `render` instead of
+    // `requested` is what keeps a transient terminal shrink from discarding --status-message-lines or
+    // a dragged size (see the clamps in run_terminal_loop()).
+    struct split_size {
+        int requested{0}; // what the user asked for: the CLI option, or the last border drag
+        int render{0};    // handed to ftxui: per-frame clamped copy, and the drag destination
+        int applied{0};   // clamped value of the previous frame; render != applied means "dragged"
+    };
+
+    split_size m_list_split{72, 72, 72}; // width of the instance list panel
+    split_size m_msg_split{12, 12, 12};  // height of the message panel
 
     // "Set name prefix" modal state; only touched on the ftxui loop thread.
     bool m_name_modal_open{false};
