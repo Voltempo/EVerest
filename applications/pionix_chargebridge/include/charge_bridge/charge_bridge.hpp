@@ -164,6 +164,10 @@ private:
     // runtime (see activate_late_bridge), for the same once-per-episode reporting.
     std::set<std::string> m_bridge_activate_failures_reported;
     bool m_runtime_start_failure_reported{false};
+    // Why the last internal runtime start failed. Written by the start action on the event loop thread
+    // before it fulfils its promise and read by the manager thread after the future has been consumed,
+    // so the future itself provides the synchronisation.
+    std::string m_runtime_start_failure_reason;
     // Liveness fallback for configs without a heartbeat block (manager thread only): when the next
     // probe is due and how many consecutive probes have failed so far.
     std::optional<std::chrono::steady_clock::time_point> m_next_liveness_probe;

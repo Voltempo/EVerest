@@ -337,6 +337,13 @@ void charge_bridge::set_bridges_cb_connection_status(bool connected) {
 // disconnected once it has been torn down. Called from the manager thread with the status monitor
 // already locked; the bridges' observables live on the event loop thread, so the cb connection
 // status is applied there. No-op when a heartbeat service is configured: it owns is_connected then.
+//
+// Keying on the config rather than on m_heartbeat is safe because start_internal_runtime() refuses to
+// start a runtime whose configured heartbeat service does not exist, which establishes the invariant
+// "m_internal_runtime_started implies m_heartbeat != nullptr whenever a heartbeat is configured". So a
+// configured heartbeat that stands down here always has an object writing is_connected instead.
+// (m_heartbeat itself must not be read here at all: it belongs to the event loop thread, and the
+// construction retry may create it while the manager is running.)
 void charge_bridge::set_runtime_connection_status(charge_bridge_status& status, bool connected) {
     if (m_config.heartbeat.has_value()) {
         return;
@@ -350,7 +357,9 @@ void charge_bridge::set_runtime_connection_status(charge_bridge_status& status, 
 
 // True while the connection state has to be derived from an explicit probe: no heartbeat service
 // owns is_connected, the runtime is up and currently considered connected. With a heartbeat block
-// this is always false, so the heartbeat behaviour is untouched.
+// this is always false, so the heartbeat behaviour is untouched — and because a started runtime
+// always has its configured heartbeat service (see set_runtime_connection_status), "no heartbeat
+// configured" and "no heartbeat object" mean the same thing for a started runtime.
 bool charge_bridge::needs_liveness_probe(charge_bridge_status const& status) const {
     return not m_config.heartbeat.has_value() and m_internal_runtime_started and m_was_connected and
            status.is_connected;
@@ -376,6 +385,7 @@ std::future<bool> charge_bridge::start_internal_runtime() {
 
     m_event_handler->add_action([this, promise = std::move(promise)]() mutable {
         try {
+            m_runtime_start_failure_reason.clear();
             // Construction is normally done eagerly at startup (see create_internal_runtime_eagerly),
             // so this only retries bridges whose local devices could not be created back then.
             create_internal_runtime();
@@ -384,6 +394,24 @@ std::future<bool> charge_bridge::start_internal_runtime() {
                 // reporting success would latch the runtime as started and stop the construction
                 // retries. Report the start as failed instead; the manager logs it and retries the
                 // whole sequence — construction included — in the next cycle.
+                m_runtime_start_failure_reason = "no bridge could be created";
+                promise->set_value(false);
+                m_cb_status.notify_one();
+                return;
+            }
+            if (m_config.heartbeat.has_value() and not m_heartbeat) {
+                // The heartbeat service is the liveness source of a config that has one: it is the only
+                // writer of is_connected then, and both set_runtime_connection_status() and
+                // needs_liveness_probe() stand down for it. A runtime started without it would have no
+                // writer at all, so the connection state could never change again - and once anything
+                // cleared it, the manager would tear the runtime down and rebuild it every cycle.
+                // Report the start as failed instead: the manager retries the whole sequence,
+                // construction included, so the runtime latches as started exactly when its liveness
+                // source exists. The bridges that were created keep their host-local devices; only the
+                // CB-side sockets their constructors brought up are dropped, which leaves the runtime
+                // in the same state as after create_internal_runtime_eagerly().
+                disconnect_internal_runtime_endpoints();
+                m_runtime_start_failure_reason = "the heartbeat service could not be created";
                 promise->set_value(false);
                 m_cb_status.notify_one();
                 return;
@@ -396,6 +424,7 @@ std::future<bool> charge_bridge::start_internal_runtime() {
                 // vcan, tap) that EVerest modules are configured against, so a failure on the
                 // ChargeBridge side must never make those devices disappear.
                 disconnect_internal_runtime_endpoints();
+                m_runtime_start_failure_reason = "no bridge could be connected and registered";
                 promise->set_value(false);
                 m_cb_status.notify_one();
                 return;
@@ -536,6 +565,9 @@ void charge_bridge::retry_missing_bridges() {
         activate(missing_plc, m_plc, m_config.plc, "plc bridge");
         activate(missing_bsp, m_bsp, m_config.bsp, "bsp bridge");
         activate(missing_io, m_io, m_config.io, "io bridge");
+        // Unreachable in practice: start_internal_runtime() does not latch a runtime whose configured
+        // heartbeat service is missing, and this retry only runs for a started runtime. Kept so the
+        // list stays exhaustive if that ever changes.
         activate(missing_heartbeat, m_heartbeat, m_config.heartbeat, "heartbeat service");
     });
 }
@@ -894,7 +926,11 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
                     try {
                         runtime_started = startup_runtime.get();
                         if (not runtime_started) {
-                            report_runtime_start_failure("no bridge could be connected and registered");
+                            // The reason is written by the start action before it fulfils the promise,
+                            // so get() above publishes it to this thread.
+                            report_runtime_start_failure(m_runtime_start_failure_reason.empty()
+                                                             ? "no bridge could be connected and registered"
+                                                             : m_runtime_start_failure_reason);
                         }
                     } catch (std::exception const& e) {
                         report_runtime_start_failure(e.what());
