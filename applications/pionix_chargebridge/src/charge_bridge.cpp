@@ -96,6 +96,43 @@ void create_bridge(std::string const& cb_name, std::string const& bridge_name, s
     }
 }
 
+// Brings a bridge that was created after the internal runtime had already come up (see
+// retry_missing_bridges) into that running runtime: connects its CB-side endpoint and registers its
+// fds with the event loop, i.e. exactly the two steps start_internal_runtime() performs for the
+// bridges that existed back then. Must only be called for a bridge that has just been created:
+// register_event_handler() rejects an fd that is already in the epoll set, so handing it a live
+// bridge would report a bogus failure and then tear a working bridge down.
+// If activation fails the bridge is dropped again. That restores the exact state before the retry, so
+// the next cadence retries the whole create + activate sequence instead of leaving an object behind
+// that is never registered and can therefore never recover.
+template <class BridgeT, class ConfigT>
+void activate_late_bridge(everest::lib::io::event::fd_event_handler& handler, std::string const& cb_name,
+                          std::string const& bridge_name, std::unique_ptr<BridgeT>& bridge,
+                          std::optional<ConfigT> const& config, std::set<std::string>& failures_reported) {
+    if (not bridge or not config.has_value()) {
+        return;
+    }
+    try {
+        bridge->connect_cb_endpoint(config->cb_remote);
+        if (handler.register_event_handler(bridge.get())) {
+            failures_reported.erase(bridge_name);
+            return;
+        }
+        // Registration can stop half way through the bridge's fds, so drop whatever made it in
+        // before the object - and with it its fds - goes away below.
+        handler.unregister_event_handler(bridge.get());
+    } catch (...) {
+        // Nothing is registered on this path (connect_cb_endpoint() threw), so the reset below is
+        // all the cleanup needed.
+    }
+    bridge.reset();
+    // Reported once per failure episode: the retry runs on the ~10 s manager cadence.
+    if (failures_reported.insert(bridge_name).second) {
+        utilities::print_error(cb_name, "RUNTIME", 1)
+            << "Failed to activate the newly created " << bridge_name << " (retrying in next cycle)" << std::endl;
+    }
+}
+
 endpoint_intent_info parse_endpoint_intent(std::string const& cb_remote) {
     endpoint_intent_info result;
 
@@ -442,6 +479,67 @@ bool charge_bridge::has_existing_bridge() const {
     return m_can_0_client or m_pty_1 or m_pty_2 or m_pty_3 or m_plc or m_bsp or m_io or m_heartbeat;
 }
 
+// True if the config asks for a bridge whose object does not exist, i.e. if a construction retry has
+// anything to do. False for a complete runtime, which makes retry_missing_bridges() a no-op then.
+// Reads the bridge pointers, so it must run on the event loop thread once the loop is up.
+bool charge_bridge::has_missing_configured_bridge() const {
+    return (m_config.can0.has_value() and not m_can_0_client) or (m_config.serial1.has_value() and not m_pty_1) or
+           (m_config.serial2.has_value() and not m_pty_2) or (m_config.serial3.has_value() and not m_pty_3) or
+           (m_config.plc.has_value() and not m_plc) or (m_config.bsp.has_value() and not m_bsp) or
+           (m_config.io.has_value() and not m_io) or (m_config.heartbeat.has_value() and not m_heartbeat);
+}
+
+// Retries the construction of configured bridges that are still missing while the internal runtime is
+// up. start_internal_runtime() - the other place that (re)creates bridges - is only reachable while
+// the ChargeBridge is not connected, so without this a bridge whose host-local device could not be
+// created (no CAP_NET_ADMIN for the vcan device, a symlink target that was not writable yet, ...)
+// would stay missing for the rest of the session even after the cause is gone.
+// The work runs on the event loop thread: it is the only thread allowed to touch the bridge objects
+// while the loop is running, and it is where the decision whether anything is missing has to be made.
+// Only the bridges created by this call are connected and registered - the already-registered ones are
+// not touched at all, so a working runtime cannot be disturbed.
+void charge_bridge::retry_missing_bridges() {
+    if (not m_event_handler) {
+        return;
+    }
+    m_event_handler->add_action([this]() {
+        if (not has_missing_configured_bridge()) {
+            return;
+        }
+
+        // What is missing before create_internal_runtime() runs is exactly what may be activated
+        // afterwards: re-registering a live bridge fails (its fds are already in the epoll set) and
+        // re-connecting one would drop the CB endpoint it is currently talking to.
+        auto const missing_can0 = not m_can_0_client;
+        auto const missing_serial1 = not m_pty_1;
+        auto const missing_serial2 = not m_pty_2;
+        auto const missing_serial3 = not m_pty_3;
+        auto const missing_plc = not m_plc;
+        auto const missing_bsp = not m_bsp;
+        auto const missing_io = not m_io;
+        auto const missing_heartbeat = not m_heartbeat;
+
+        create_internal_runtime();
+
+        auto activate = [this](bool was_missing, auto& bridge, auto const& config, std::string const& bridge_name) {
+            if (not was_missing) {
+                return;
+            }
+            activate_late_bridge(*m_event_handler, m_config.cb_name, bridge_name, bridge, config,
+                                 m_bridge_activate_failures_reported);
+        };
+
+        activate(missing_can0, m_can_0_client, m_config.can0, "can bridge");
+        activate(missing_serial1, m_pty_1, m_config.serial1, "serial bridge 1");
+        activate(missing_serial2, m_pty_2, m_config.serial2, "serial bridge 2");
+        activate(missing_serial3, m_pty_3, m_config.serial3, "serial bridge 3");
+        activate(missing_plc, m_plc, m_config.plc, "plc bridge");
+        activate(missing_bsp, m_bsp, m_config.bsp, "bsp bridge");
+        activate(missing_io, m_io, m_config.io, "io bridge");
+        activate(missing_heartbeat, m_heartbeat, m_config.heartbeat, "heartbeat service");
+    });
+}
+
 // Reports a failed internal runtime start once per failure episode: the manager retries on its ~10 s
 // cadence, so logging every attempt would flood the log for a device that stays unusable, while the
 // flag still lets the next failure after a successful start be reported.
@@ -668,6 +766,7 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
             m_was_connected = false;
             m_liveness_probe_failures = 0;
             m_next_liveness_probe.reset();
+            m_next_bridge_retry.reset();
             set_runtime_connection_status(current_status, false);
 
             if (is_mdns_endpoint()) {
@@ -764,6 +863,23 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
                     // through the normal connect path.
                     set_runtime_connection_status(current_status, false);
                 }
+            }
+        }
+
+        // Keep retrying bridges that could not be constructed. The connect path retries them on every
+        // attempt, but it is unreachable once the ChargeBridge is connected, so a configured bridge
+        // that failed to bring up its host-local device would otherwise stay missing (and, since
+        // get_status() reports it as unavailable, keep this instance red) for the whole session. The
+        // bridge pointers may only be read on the event loop thread, so whether there is anything to
+        // create at all is decided inside the posted action.
+        if (m_internal_runtime_started and m_was_connected and current_status.is_connected) {
+            if (not m_next_bridge_retry.has_value()) {
+                // The runtime just came up and has created what it could: start the schedule instead
+                // of retrying the same construction again right away.
+                m_next_bridge_retry = now + manager_base_cycle;
+            } else if (now >= m_next_bridge_retry.value()) {
+                m_next_bridge_retry = now + manager_base_cycle;
+                retry_missing_bridges();
             }
         }
 
@@ -1039,36 +1155,57 @@ utilities::chargebridge_status charge_bridge::get_status() {
         status.network = std::move(net);
     }
 
+    // An unset optional means "not configured" to every consumer (the dashboard glyph, the status log
+    // line's aggregate and the MQTT chargebridge/status roll-up all skip fields without a value), so a
+    // bridge that is configured but has no object - its construction failed, e.g. no CAP_NET_ADMIN for
+    // the vcan device - must be reported as not available instead of being left unset. Otherwise a
+    // partial bridge set looks completely healthy while a service EVerest depends on is missing.
     if (m_can_0_client) {
         auto available = m_can_0_client->available();
         status.can0.emplace(available);
+    } else if (m_config.can0.has_value()) {
+        status.can0.emplace(false);
     }
     if (m_pty_1) {
         auto available = m_pty_1->available();
         status.serial1.emplace(available);
+    } else if (m_config.serial1.has_value()) {
+        status.serial1.emplace(false);
     }
     if (m_pty_2) {
         auto available = m_pty_2->available();
         status.serial2.emplace(available);
+    } else if (m_config.serial2.has_value()) {
+        status.serial2.emplace(false);
     }
     if (m_pty_3) {
         auto available = m_pty_3->available();
         status.serial3.emplace(available);
+    } else if (m_config.serial3.has_value()) {
+        status.serial3.emplace(false);
     }
     if (m_bsp) {
         auto available = m_bsp->available();
         status.bsp.emplace(available);
         status.cp_state = m_bsp->cp_state();
+    } else if (m_config.bsp.has_value()) {
+        status.bsp.emplace(false);
     }
     if (m_plc) {
         auto available = m_plc->available();
         status.plc.emplace(available);
+    } else if (m_config.plc.has_value()) {
+        status.plc.emplace(false);
     }
     if (m_heartbeat) {
         auto available = m_heartbeat->available();
         status.heartbeat.emplace(available);
         status.mcu_resets.emplace(m_heartbeat->mcu_reset_count());
         status.telemetry = m_heartbeat->latest_telemetry();
+    } else if (m_config.heartbeat.has_value()) {
+        // The numeric fields stay unset: there is no MCU reset count or telemetry to report, and
+        // "N/A" is the honest rendering for them. Only the availability flag carries health.
+        status.heartbeat.emplace(false);
     }
     if (m_io) {
         auto available = m_io->available();
@@ -1078,6 +1215,8 @@ utilities::chargebridge_status charge_bridge::get_status() {
             status.adc = std::move(io->adc);
             status.io_telemetry = std::move(io->telemetry);
         }
+    } else if (m_config.io.has_value()) {
+        status.io.emplace(false);
     }
 
     return status;

@@ -104,6 +104,8 @@ private:
     void create_internal_runtime_eagerly();
     bool has_configured_bridge() const;
     bool has_existing_bridge() const;
+    bool has_missing_configured_bridge() const;
+    void retry_missing_bridges();
     void report_runtime_start_failure(std::string const& reason);
     void connect_internal_runtime_endpoints();
     void disconnect_internal_runtime_endpoints();
@@ -158,11 +160,17 @@ private:
     // Bridges whose construction failure has already been reported, so the retry on the manager
     // cadence does not repeat the message until that bridge has been created successfully.
     std::set<std::string> m_bridge_create_failures_reported;
+    // Bridges that were created late but could not be connected and registered into the running
+    // runtime (see activate_late_bridge), for the same once-per-episode reporting.
+    std::set<std::string> m_bridge_activate_failures_reported;
     bool m_runtime_start_failure_reported{false};
     // Liveness fallback for configs without a heartbeat block (manager thread only): when the next
     // probe is due and how many consecutive probes have failed so far.
     std::optional<std::chrono::steady_clock::time_point> m_next_liveness_probe;
     int m_liveness_probe_failures{0};
+    // When the next attempt to construct configured-but-missing bridges is due while the runtime is up
+    // (manager thread only). Unset while no runtime is running.
+    std::optional<std::chrono::steady_clock::time_point> m_next_bridge_retry;
     std::thread m_manager;
     endpoint_intent_info m_endpoint_intent;
     // Network identity of the discovered endpoint (hostname, service instance, TXT records). Empty
