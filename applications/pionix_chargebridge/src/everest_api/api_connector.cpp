@@ -211,8 +211,7 @@ void api_connector::handle_cb_connection_state() {
     if (m_cb_initial_comm_check) {
         handle_status(current);
         m_cb_initial_comm_check = false;
-    }
-    if (m_cb_connected != current) {
+    } else if (m_cb_connected != current) {
         handle_status(not m_cb_connected);
     }
     m_cb_connected = current;
