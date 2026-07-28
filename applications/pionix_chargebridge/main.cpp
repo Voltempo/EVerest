@@ -66,8 +66,9 @@ mode parse_args(int argc, char* argv[], std::vector<std::string>& config_files,
                      "                    0 is clamped to 1: terminal mode captures all diagnostics, so the\n"
                      "                    panel cannot be hidden; use --status-output=log for plain log output\n"
                      "                    ignored in log/off modes\n";
-        std::cout << "--status-no-color  disable ANSI colors in the terminal dashboard output\n"
-                     "                    message area and non-color controls remain unchanged\n";
+        std::cout << "--status-no-color   disable ANSI colors in the terminal dashboard and in the status\n"
+                     "                    and diagnostic output; non-color controls remain unchanged\n"
+                     "                    colors are off automatically when stdout is not a TTY\n";
         std::cout << "config_file         use this configuration file\n";
         std::cout << "config_file_x       add more configuration files for each additional ChargeBridge group\n";
         std::cout << "\n";
@@ -377,6 +378,11 @@ int main(int argc, char* argv[]) {
         }
         return EXIT_FAILURE;
     }
+
+    // One decision for every diagnostic written to stdout: the key=value status lines, print_error and
+    // print_info (the dashboard has its own no_color handling). Escapes are pointless in a redirected
+    // log and --status-no-color drops them on a TTY as well.
+    utilities::set_diagnostic_color_enabled(stdout_is_tty and not ui_options.no_color);
 
     for (auto const& elem : config_files) {
         auto config_list = utilities::parse_config_multi(elem);

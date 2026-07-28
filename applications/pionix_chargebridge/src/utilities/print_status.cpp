@@ -9,9 +9,9 @@
 #include <optional>
 #include <sstream>
 #include <string>
-#include <unistd.h>
 #include <vector>
 
+#include <charge_bridge/utilities/logging.hpp>
 #include <charge_bridge/utilities/print_status.hpp>
 
 namespace charge_bridge::utilities {
@@ -184,8 +184,10 @@ void print_status_log(const chargebridge_status& s, std::ostream& os) {
 
     // Log mode is auto-selected when stdout is not a TTY, so colorize only when stdout actually is a
     // terminal. Otherwise the ANSI escapes pollute log files / journald and break downstream parsing.
-    static const bool use_color = ::isatty(STDOUT_FILENO) != 0;
-    auto col = [](char const* code) { return use_color ? code : ""; };
+    // Shared with print_error/print_info so one setting (and --status-no-color) covers all diagnostic
+    // output; not cached, because it is set from the command line after the first call is possible.
+    const bool use_color = diagnostic_color_enabled();
+    auto col = [use_color](char const* code) { return use_color ? code : ""; };
 
     // Mirror the "[ <unit> ] <device>  <details>" style of print_error, with the unit colored red while
     // not everything is connected and green once all services are up. This gives a single line that

@@ -11,6 +11,13 @@ namespace charge_bridge::utilities {
 // non-instance-specific messages) and the fully formatted message line.
 using print_error_sink = std::function<void(std::string device, std::string message)>;
 
+// Whether diagnostics written to stdout (print_error/print_info without a sink, and the key=value
+// status lines) may use ANSI colors. Defaults to "stdout is a TTY", so escapes never end up in a
+// redirected log by accident; --status-no-color turns them off for a TTY too. Set once during
+// startup, read from every logging thread.
+void set_diagnostic_color_enabled(bool enabled);
+bool diagnostic_color_enabled();
+
 std::ostream& print_error(std::string const& device, std::string const& unit, int status);
 // Informational log line (no WARNING/ERROR level). Routes through the print_error sink when one is
 // installed (so it shows in the terminal UI's message panel instead of being painted over by the

@@ -5,9 +5,11 @@
 
 #include <everest/util/async/monitor.hpp>
 
+#include <atomic>
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 
 namespace charge_bridge::utilities {
 
@@ -50,6 +52,10 @@ std::ostream& operator<<(std::ostream& s, color c) {
 }
 
 namespace {
+
+// Initialized before main() runs, so the very first diagnostic already gets it right; main()
+// overrides it once the command line is parsed (--status-no-color).
+std::atomic<bool> diagnostic_color{::isatty(STDOUT_FILENO) != 0};
 
 using print_error_sink_storage = print_error_sink;
 
@@ -192,25 +198,46 @@ inline std::ostream& capture_print_info(std::string const& device, std::string c
     return capture_stream;
 }
 
+void set_diagnostic_color_enabled(bool enabled) {
+    diagnostic_color.store(enabled);
+}
+
+bool diagnostic_color_enabled() {
+    return diagnostic_color.load();
+}
+
 std::ostream& print_error(std::string const& device, std::string const& unit, int status) {
+    if (current_print_error_sink()) {
+        return capture_print_error(device, unit, status);
+    }
+
+    // Without a sink the line goes to stdout, which in log mode is regularly a file or the journal:
+    // colorize it only when colors are wanted there, otherwise the escapes pollute the log and break
+    // downstream parsing (print_status_log() makes the same distinction). The sink's own fallback path
+    // (publish_line()) is unaffected: it writes the plain prefix.
+    if (not diagnostic_color_enabled()) {
+        return std::cout << print_error_prefix_plain(device, unit, status);
+    }
+
     // clang-format off
     auto ctrl =
         status == 0 ? color::success :
         status == -1 ? color::warning:
         color::error;
-
-    if (current_print_error_sink()) {
-        return capture_print_error(device, unit, status);
-    }
+    // clang-format on
 
     std::cout << print_error_prefix_ansi(device, unit, ctrl, status);
     return std::cout << color::standard;
-    // clang-format on
 }
 
 std::ostream& print_info(std::string const& device, std::string const& unit) {
     if (current_print_error_sink()) {
         return capture_print_info(device, unit);
+    }
+
+    // See print_error(): no escapes unless colors are wanted on stdout.
+    if (not diagnostic_color_enabled()) {
+        return std::cout << print_info_prefix_plain(device, unit);
     }
 
     std::cout << print_info_prefix_ansi(device, unit);
