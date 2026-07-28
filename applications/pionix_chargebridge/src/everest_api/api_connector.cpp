@@ -88,6 +88,14 @@ bool api_connector::register_events(everest::lib::io::event::fd_event_handler& h
     }
     result = handler.register_event_handler(&m_mqtt) && result;
     result = handler.register_event_handler(&m_sync_timer, [this](auto&) {
+        // The ChargeBridge state is evaluated first, so the adapters are sync'd with this tick's
+        // value and not with the previous one. The adapters decide from it whether an EVerest that
+        // just came back gets the device state replayed or a communication fault, and both edges can
+        // fall into the same 1 s tick: with the old order a coincident CB-connect + EVerest-connect
+        // lost the replay entirely (fault raised, then cleared by the CB edge, EVerest left blank),
+        // and a coincident CB-disconnect replayed a snapshot of a device that had just gone away.
+        // Re-raising a fault the CB edge already raised is a no-op in the EVerest error framework.
+        handle_cb_connection_state();
         if (m_evse_bsp_enabled) {
             m_evse_bsp.sync(m_cb_connected);
         }
@@ -97,7 +105,6 @@ bool api_connector::register_events(everest::lib::io::event::fd_event_handler& h
         if (m_ev_bsp_enabled) {
             m_ev_bsp.sync(m_cb_connected);
         }
-        handle_cb_connection_state();
     }) && result;
     return result;
 }

@@ -399,6 +399,11 @@ void ev_bsp_api::handle_everest_connection_state() {
                 // otherwise 'last_cp_event' is the initial 'Disconnected' or a stale event of a
                 // device that is gone, and replaying it would describe the wrong device.
                 send_bsp_event(last_cp_event);
+                // The relay state is a bsp_event too and equally published on change only, so a
+                // restarted EVerest would otherwise not learn about closed contactors until the MCU
+                // happens to open them. Replayed through the same handler set_cb_message() uses,
+                // which does not latch on a previous state (and ignores an invalid relay value).
+                handle_event_relay(m_cb_status.relay_state);
             } else {
                 // The communication fault is edge triggered on the ChargeBridge connection, so a
                 // freshly (re)started EVerest does not know about it. Re-assert it here,

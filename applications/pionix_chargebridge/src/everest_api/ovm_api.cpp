@@ -218,11 +218,28 @@ void ovm_api::handle_everest_connection_state() {
     auto handle_status = [this](bool status) {
         if (status) {
             utilities::print_error(m_cb_identifier, "OVM/EVEREST", 0) << "EVerest connected" << std::endl;
-            // The communication fault is edge triggered on the ChargeBridge connection, so a
-            // freshly (re)started EVerest does not know about it. Re-assert it here, otherwise
-            // the monitor reads as fault free for an unreachable ChargeBridge. Raising an
-            // already active error is a no-op in the EVerest error framework.
-            if (not m_cb_connected) {
+            if (m_cb_connected) {
+                // A freshly (re)started EVerest lost every error raised before it came up, while the
+                // MCU keeps its latched ones - and these errors are published on change only, so
+                // without a replay a latched over-voltage stays invisible until the MCU happens to
+                // toggle it. Replay through the very handlers set_cb_message() uses, so the sub_type
+                // a replayed raise carries is by construction the one a later clear will use. Only
+                // active flags are replayed (like the evse adapter's 0 -> raw edge publication): a
+                // clear for an error a fresh EVerest never had says nothing. Raising an already
+                // active error is ignored by the EVerest error framework, so a mere heartbeat gap
+                // costs nothing here.
+                if (m_cb_status.error_flags.flags.dc_hv_ov_emergency not_eq 0) {
+                    handle_dc_hv_ov_emergency(true);
+                }
+                if (m_cb_status.error_flags.flags.dc_hv_ov_error not_eq 0) {
+                    handle_dc_hv_ov_error(true);
+                }
+            } else {
+                // Without a live ChargeBridge m_cb_status is zero or a stale snapshot of a device
+                // that is gone, so it must not be replayed. The communication fault is edge
+                // triggered on the ChargeBridge connection and equally unknown to a restarted
+                // EVerest, so re-assert it here - otherwise the monitor reads as fault free for an
+                // unreachable ChargeBridge.
                 raise_comm_fault();
             }
         } else {
