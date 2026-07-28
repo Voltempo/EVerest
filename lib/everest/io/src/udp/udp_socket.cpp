@@ -55,7 +55,7 @@ int udp_socket_base::get_error() const {
 
 bool udp_socket_base::tx_impl(void const* payload, size_t size) {
     if (not is_open()) {
-        return ENETDOWN;
+        return false;
     }
     size_t nbytes = ::send(m_owned_udp_fd, payload, size, 0);
 
