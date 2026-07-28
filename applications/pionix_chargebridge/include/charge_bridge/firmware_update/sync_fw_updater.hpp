@@ -10,6 +10,14 @@
 
 namespace charge_bridge::firmware_update {
 
+/// Request/reply budget every request of the firmware management socket uses unless it passes its
+/// own: the reply is awaited for default_udp_timeout_ms and the datagram is retransmitted
+/// default_udp_retries times, so a request to an unreachable device takes retries * timeout to fail.
+/// Sized for the slow, one-shot firmware operations (a device in bootloader mode is answering while
+/// it erases flash); periodic callers pass a short budget of their own instead.
+constexpr std::uint16_t default_udp_retries = 3;
+constexpr std::uint16_t default_udp_timeout_ms = 3000;
+
 struct fw_update_config {
     std::string cb;
     std::uint16_t cb_port;
@@ -32,7 +40,15 @@ public:
 
     std::optional<std::string> get_fw_version();
     bool switch_bank();
-    bool ping();
+    /// Silent management-port ping: unlike quick_check_connection()/check_connection() it reports
+    /// nothing, which makes it usable as a periodic liveness probe.
+    /// @param timeout_ms How long a single attempt waits for the reply.
+    /// @param retries How often the ping is retransmitted after an unanswered attempt, so an
+    /// unanswered ping costs retries * timeout_ms (the abort check, if armed, cuts that short). A
+    /// reachable device answers the first attempt, so its cost is one round trip regardless.
+    /// The defaults are the slow firmware budget (3 x 3000 ms = 9 s); a caller on a fixed cadence
+    /// must pass a budget that fits its cycle.
+    bool ping(std::uint16_t timeout_ms = default_udp_timeout_ms, std::uint16_t retries = default_udp_retries);
     bool upload_fw();
 
     void print_fw_version();

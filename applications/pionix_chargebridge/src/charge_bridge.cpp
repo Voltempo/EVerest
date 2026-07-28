@@ -27,9 +27,19 @@ constexpr auto discovery_attempt_timeout = std::chrono::seconds(10);
 constexpr auto discovery_retry_delay = std::chrono::seconds(1);
 constexpr auto manager_base_cycle = std::chrono::seconds(10);
 // Consecutive failed liveness probes before a heartbeat-less ChargeBridge is declared gone. Two
-// probes debounce a single lost datagram (the probe itself already retries) without letting a dead
-// device look connected for much longer than one manager cycle.
+// probes debounce a single lost datagram (the probe itself already retries), at the price of one
+// extra manager cycle: a device that stops answering is detected after two failed probes, i.e. after
+// at most 2 * (manager_base_cycle + failed probe) ~ 21 s.
 constexpr int liveness_probe_failure_limit = 2;
+
+// Request/reply budget of a single liveness probe, deliberately far below the firmware defaults
+// (3 x 3000 ms = 9 s): the probe runs on the manager thread, so its budget is what a *failed* probe
+// costs that thread and adds to the detection latency above. Three 200 ms reply windows keep a
+// single lost datagram from failing the probe (the ping is retransmitted after each) and bound a
+// failed probe at ~600 ms - well inside the 10 s cycle. A reachable device answers the first
+// attempt, so the budget costs a healthy probe nothing.
+constexpr std::uint16_t liveness_probe_timeout_ms = 200;
+constexpr std::uint16_t liveness_probe_retries = 3;
 
 std::pair<bool, std::set<std::string>> make_interface_list(std::string const& str, std::string const& pattern) {
     if (str == pattern) {
@@ -379,11 +389,16 @@ bool charge_bridge::needs_liveness_probe(charge_bridge_status const& status) con
 
 // Cheap, silent liveness check: the same management-port request/reply ping the reconnect path uses
 // (sync_fw_updater::ping() logs nothing, unlike quick_check_connection()), on a short-lived socket.
-// The abort check is armed so a pending shutdown is not delayed by the request's retry budget.
+// Explicitly budgeted instead of running the firmware default of 9 s, which no periodic caller can
+// afford (see liveness_probe_timeout_ms). The abort check is armed so a pending shutdown is not
+// delayed by the remaining budget, and ping() matches the reply against the ping tag, so a late reply
+// to some earlier request cannot pass as this probe's answer.
+// A socket that never opened needs no special case: udp tx on a closed socket fails, and
+// request_reply() gives up on the first failed transmission, so such a probe returns immediately.
 // Blocks, so the caller must not hold the status monitor.
 bool charge_bridge::probe_device_liveness(std::function<bool()> const& abort_requested) {
     firmware_update::sync_fw_updater updater(m_config.firmware, abort_requested);
-    return updater.ping();
+    return updater.ping(liveness_probe_timeout_ms, liveness_probe_retries);
 }
 
 std::future<bool> charge_bridge::start_internal_runtime() {
@@ -863,9 +878,11 @@ void charge_bridge::manage(everest::lib::io::event::fd_event_handler& handler, s
 
         // Liveness fallback for configs without a heartbeat block: nothing else ever clears
         // is_connected there, so an unplugged ChargeBridge would report connected forever and mDNS
-        // would never re-discover it. Probing on the regular manager cadence adds no wakeups and no
-        // traffic for heartbeat configs; a healthy device answers in microseconds, so this cannot
-        // reintroduce a 10 s teardown/reconnect thrash.
+        // would never re-discover it. Probing rides the regular manager cadence, so it adds no
+        // wakeups - and none at all for heartbeat configs, which never get here. A reachable device
+        // answers the first datagram, so a healthy cycle is one round trip; a failed probe blocks this
+        // thread for its budget (~600 ms, see liveness_probe_timeout_ms), which stretches the cycle to
+        // ~10.6 s and puts detection at up to two cycles (~21 s) after the device stopped answering.
         if (needs_liveness_probe(current_status)) {
             if (not m_next_liveness_probe.has_value()) {
                 // The runtime just came up after a successful connection probe: start the schedule

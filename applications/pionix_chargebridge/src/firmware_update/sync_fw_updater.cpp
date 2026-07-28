@@ -12,7 +12,6 @@
 #include <fstream>
 
 namespace {
-const int default_udp_timeout_ms = 3000;
 // Every CB management packet starts with the CbStructType tag, the payload follows it.
 const std::size_t cb_header_size = sizeof(CbStructType);
 // A version reply is the header followed by a NUL terminated string, so the shortest reply that
@@ -92,7 +91,7 @@ static utilities::sync_udp_client::reply_filter version_reply_filter() {
 }
 
 sync_fw_updater::sync_fw_updater(fw_update_config const& config, std::function<bool()> abort_requested) :
-    m_udp(config.cb_remote, config.cb_port, 3, default_udp_timeout_ms),
+    m_udp(config.cb_remote, config.cb_port, default_udp_retries, default_udp_timeout_ms),
     m_config(config),
     m_abort_requested(std::move(abort_requested)) {
 }
@@ -192,11 +191,13 @@ std::string sync_fw_updater::connection_result_message(bool connected) const {
     return "No connection to ChargeBridge";
 }
 
-bool sync_fw_updater::ping() {
+bool sync_fw_updater::ping(std::uint16_t timeout_ms, std::uint16_t retries) {
     everest::lib::io::udp::udp_payload pl = make_ping_command();
 
+    // Reply filter and abort check are passed on every path: a caller with a short budget is the one
+    // that would otherwise mistake a late reply to a previous request for this ping's answer.
     auto const accept_reply = status_reply_filter(CbStructType::CST_CbFirmwarePing);
-    return m_udp.request_reply(pl, m_abort_requested, accept_reply).has_value();
+    return m_udp.request_reply(pl, timeout_ms, retries, m_abort_requested, accept_reply).has_value();
 }
 
 bool sync_fw_updater::check_reply(utilities::sync_udp_client::reply const& val) {
