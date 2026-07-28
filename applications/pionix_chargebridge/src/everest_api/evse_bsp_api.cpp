@@ -62,8 +62,16 @@ bool evse_bsp_api::register_events(everest::lib::io::event::fd_event_handler& ha
     // clang-format off
     return
         handler.register_event_handler(&m_capabilities_timer, [this](auto&) {
+            // The capabilities are static configuration and do not depend on a ChargeBridge, so
+            // they are re-sent unconditionally: EVerest needs them even before one shows up.
             send_capabilities();
-            handle_pp_type2(cb_status.pp_state_type2);
+            // The PP state on the other hand comes from 'cb_status', which is zero (or a stale
+            // snapshot of a device that is gone) without a live ChargeBridge. Replaying it would
+            // publish ampacity 'None' (state NC is 0) and clear a latched proximity fault for a
+            // device that is not there, so it is only replayed while one is connected.
+            if (m_cb_connected) {
+                handle_pp_type2(cb_status.pp_state_type2);
+            }
         });
     // clang-format on
 }
@@ -557,6 +565,12 @@ void evse_bsp_api::handle_everest_connection_state() {
                 // state) plus an active proximity fault state.
                 publish_error_flag_edges(0, cb_status.error_flags.raw);
                 handle_pp_type2(cb_status.pp_state_type2, true);
+                // CP and relay state are published on change only, so a restarted EVerest would
+                // otherwise see no BSP event (and no MREC14PilotFault/DiodeFault) until the MCU
+                // happens to change state or EvseManager re-sends 'enable'. Neither handler
+                // latches on a previous state, so both replay the current state unconditionally.
+                handle_event_cp(cb_status.cp_state);
+                handle_event_relay(cb_status.relay_state);
             } else {
                 // Without a live ChargeBridge 'cb_status' is zero or a stale snapshot of a
                 // device that is gone (or has been replaced), so it must not be replayed: that
