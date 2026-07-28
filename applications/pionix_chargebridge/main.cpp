@@ -5,6 +5,8 @@
 #include "charge_bridge/utilities/string.hpp"
 #include <algorithm>
 #include <atomic>
+#include <charge_bridge/discovery.hpp>
+#include <charge_bridge/utilities/logging.hpp>
 #include <charge_bridge/utilities/parse_config.hpp>
 #include <chrono>
 #include <csignal>
@@ -16,7 +18,11 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <optional>
+#include <set>
+#include <string>
 #include <unistd.h>
+#include <vector>
 
 using namespace everest::lib::io::event;
 using namespace everest::lib::API::V1_0::types;
@@ -39,8 +45,11 @@ mode parse_args(int argc, char* argv[], std::vector<std::string>& config_files,
         std::cout << "\n";
         std::cout << "--update            use this flag to execute an update at start and continue operation after\n";
         std::cout << "--update_only       use this flag to execute an update and stop the application after\n"
-                     "                    no status dashboard is started, progress goes to stdout and the exit\n"
-                     "                    status reports whether every update succeeded\n";
+                     "                    no status dashboard is started (--status-output is ignored, no TTY is\n"
+                     "                    required), progress goes to stdout and the exit status reports whether\n"
+                     "                    every configured instance was updated: a discovery endpoint\n"
+                     "                    (ip: ANY_EVSE / ANY_EV) is resolved by a single bounded mDNS discovery\n"
+                     "                    first, and an instance that is not reached or not updated fails the run\n";
         std::cout << "--status-output=auto|log|terminal|off\n"
                      "                    output mode for charge_bridge status output.\n"
                      "                    auto: table if stdin and stdout are a TTY, key=value log otherwise\n"
@@ -168,6 +177,168 @@ void signal_handler(int signum) {
     g_run_application = false;
 }
 
+namespace {
+
+// How long --update_only waits for a device to announce itself before it gives up on one instance.
+// Matches the per-attempt timeout of the managed path (charge_bridge.cpp), which retries forever -
+// an update-only run has to terminate, so there is exactly one attempt.
+constexpr auto update_only_discovery_timeout = std::chrono::seconds(10);
+constexpr auto update_only_discovery_poll_interval = std::chrono::milliseconds(100);
+
+// mDNS spelling of a config's `ip:` field. Mirrors parse_endpoint_intent()/make_interface_list() in
+// charge_bridge.cpp (both are file-local there): "ANY_EVSE"/"ANY_EV" pick the device type, an
+// optional suffix restricts the interfaces to search ("ANY_EVSE(eth0,eth1)") or excludes them
+// ("ANY_EVSE(!wlan0)"). Only --update_only needs the intent here, because it resolves the endpoint
+// itself; every other mode gets it from charge_bridge::manage(). Keep the two in sync.
+struct mdns_endpoint {
+    discovery_device_type type{discovery_device_type::CB_EVSE};
+    std::set<std::string> interfaces;
+    bool excluding{false};
+};
+
+std::optional<mdns_endpoint> parse_mdns_endpoint(std::string const& cb_remote) {
+    mdns_endpoint result;
+    std::string pattern;
+    if (utilities::string_starts_with(cb_remote, "ANY_EVSE")) {
+        result.type = discovery_device_type::CB_EVSE;
+        pattern = "ANY_EVSE";
+    } else if (utilities::string_starts_with(cb_remote, "ANY_EV")) {
+        result.type = discovery_device_type::CB_EV;
+        pattern = "ANY_EV";
+    } else {
+        return std::nullopt;
+    }
+
+    // "ANY_EVSE(...)": drop the opening parenthesis, then an optional leading '!' marks the list as
+    // excluding. Anything too short to hold "x)" carries no interface, i.e. search all of them.
+    auto const raw = utilities::string_after_pattern(cb_remote, pattern);
+    if (raw.size() > 3) {
+        auto const list = raw.substr(1);
+        result.excluding = list.substr(0, 1) == "!";
+        result.interfaces = utilities::csv_to_set(list.substr(result.excluding ? 1 : 0));
+    }
+    return result;
+}
+
+// One bounded mDNS discovery attempt, driven by a private event handler: --update_only runs before
+// (and without) the application's event loop, so the managed path's discovery - which lives in
+// charge_bridge::manage() - is not available. Returns the address of the first matching device, or
+// nothing on timeout, abort or a discovery that cannot be started.
+std::optional<std::string> discover_update_endpoint(std::string const& cb_name, mdns_endpoint const& endpoint) {
+    std::optional<std::string> discovered_ip;
+    // Declared before the discovery object so it is destroyed last. Nothing polls it after this
+    // function returns, so even an exception escaping the loop below (which skips the unregister) can
+    // only leave an entry for an already closed file descriptor in a map that is about to be freed.
+    fd_event_handler handler;
+
+    try {
+        discovery mdns(endpoint.type, endpoint.interfaces, endpoint.excluding, cb_name);
+        mdns.set_discovery_callback([&discovered_ip](everest::lib::io::mdns::mDNS_discovery const& info) {
+            if (not discovered_ip.has_value()) {
+                discovered_ip = info.ip;
+            }
+        });
+
+        if (not handler.register_event_handler(&mdns)) {
+            handler.unregister_event_handler(&mdns);
+            utilities::print_error(cb_name, "DISCOVERY", 1) << "Failed to register mDNS discovery handler" << std::endl;
+            return std::nullopt;
+        }
+
+        utilities::print_info(cb_name, "DISCOVERY") << "Waiting up to " << update_only_discovery_timeout.count()
+                                                    << " s for the device to announce itself" << std::endl;
+
+        auto const deadline = std::chrono::steady_clock::now() + update_only_discovery_timeout;
+        while (not discovered_ip.has_value() and g_run_application.load() and
+               std::chrono::steady_clock::now() < deadline) {
+            handler.poll(update_only_discovery_poll_interval);
+            handler.run_actions();
+        }
+        // While mdns is still alive: unregistering calls back into it.
+        handler.unregister_event_handler(&mdns);
+    } catch (std::exception const& e) {
+        utilities::print_error(cb_name, "DISCOVERY", 1) << "mDNS discovery failed: " << e.what() << std::endl;
+        return std::nullopt;
+    }
+
+    if (not discovered_ip.has_value()) {
+        utilities::print_error(cb_name, "DISCOVERY", 1)
+            << (g_run_application.load() ? "No ChargeBridge announced itself, nothing to update"
+                                         : "Discovery stopped: shutdown requested")
+            << std::endl;
+        return std::nullopt;
+    }
+
+    utilities::print_error(cb_name, "DISCOVERY", 0) << "Discovered at: " << *discovered_ip << std::endl;
+    return discovered_ip;
+}
+
+// Replaces a discovery endpoint (ip: ANY_EVSE / ANY_EV) by the address of the device that answers.
+// Fixed-IP configs are left untouched and always succeed here.
+bool resolve_update_endpoint(charge_bridge_config& config) {
+    auto const endpoint = parse_mdns_endpoint(config.cb_remote);
+    if (not endpoint.has_value()) {
+        return true;
+    }
+
+    auto const discovered_ip = discover_update_endpoint(config.cb_name, *endpoint);
+    if (not discovered_ip.has_value()) {
+        return false;
+    }
+
+    // update_firmware() only ever uses the firmware endpoint; cb_remote is rewritten as well so both
+    // stay consistent. The per-bridge endpoints are deliberately left alone: no bridge is created in
+    // update-only mode (charge_bridge::manage() is never called).
+    config.cb_remote = *discovered_ip;
+    config.firmware.cb_remote = *discovered_ip;
+    return true;
+}
+
+// --update_only: flash every configured instance and stop, without an event loop, manager threads or
+// a status dashboard. Returns the process exit code; EXIT_SUCCESS means every configured instance was
+// updated successfully.
+int run_update_only(std::vector<charge_bridge_config> const& cb_configs) {
+    auto abort_requested = []() { return not g_run_application.load(); };
+    auto all_ok = true;
+
+    for (std::size_t idx = 0; idx < cb_configs.size(); ++idx) {
+        // A copy: resolving a discovery endpoint rewrites it.
+        auto config = cb_configs[idx];
+        print_charge_bridge_config(config);
+
+        if (not resolve_update_endpoint(config)) {
+            all_ok = false;
+        } else {
+            ::charge_bridge::charge_bridge cb(config);
+            // Signal handlers are installed already, so let Ctrl-C interrupt the upload here too. No
+            // status UI is running, so the upload's progress goes to plain stdout (the print sink is
+            // installed by ui.run(), see status_ui::run()).
+            all_ok = cb.update_firmware(true, abort_requested) and all_ok;
+        }
+
+        if (abort_requested()) {
+            // A signal that arrives while - or after - an instance is updated ends the run here. The
+            // instance's own result stands as update_firmware() reported it: an upload that was cut
+            // short fails on its own, a completed one stays a success (a signal must not turn it into
+            // a failure). Only instances that are skipped from here on make the run fail.
+            auto const skipped = cb_configs.size() - idx - 1;
+            if (skipped > 0) {
+                utilities::print_error("", "FIRMWARE", 1)
+                    << "Firmware update stopped: " << skipped << " configured instance(s) not updated" << std::endl;
+                all_ok = false;
+            }
+            break;
+        }
+    }
+
+    if (auto const signum = g_shutdown_signal.load(); signum != 0) {
+        std::cout << "\nSignal " << signum << " received. Firmware update stopped." << std::endl;
+    }
+    return all_ok ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
+} // namespace
+
 int main(int argc, char* argv[]) {
     std::cout << "PIONIX ChargeBridge (C) 2025-2026\n" << std::endl;
 
@@ -187,12 +358,17 @@ int main(int argc, char* argv[]) {
     if (mode_of_operation == mode::error) {
         return EXIT_FAILURE;
     }
+    // --update_only neither starts the dashboard nor reads stdin (see run_update_only), so none of the
+    // status output setup below applies to it - in particular not the TTY requirement, which used to
+    // refuse an update whose output was redirected.
+    auto const update_only = mode_of_operation == mode::update_only;
+
     // The terminal dashboard also reads and raw-modes stdin, so both fds must be TTYs. A TTY stdout with
     // an unusable stdin (redirected from /dev/null, closed fd 0) makes the input listener spin at 100% CPU.
     bool stdin_is_tty = isatty(STDIN_FILENO);
     bool stdout_is_tty = isatty(STDOUT_FILENO);
     bool terminal_usable = stdin_is_tty && stdout_is_tty;
-    if (status_output_mode == utilities::status_output_mode::terminal && not terminal_usable) {
+    if (not update_only && status_output_mode == utilities::status_output_mode::terminal && not terminal_usable) {
         if (not stdin_is_tty) {
             std::cerr << "--status-output=terminal requires stdin to be a TTY" << std::endl;
         }
@@ -200,6 +376,30 @@ int main(int argc, char* argv[]) {
             std::cerr << "--status-output=terminal requires stdout to be a TTY" << std::endl;
         }
         return EXIT_FAILURE;
+    }
+
+    for (auto const& elem : config_files) {
+        auto config_list = utilities::parse_config_multi(elem);
+        if (config_list.empty()) {
+            return EXIT_FAILURE;
+        }
+
+        for (auto const& config : config_list) {
+            if (cb_ids_in_use.count(config.cb_name) > 0) {
+                std::cerr << "Duplicate charge_bridge::name '" << config.cb_name << "'" << std::endl;
+                return EXIT_FAILURE;
+            }
+
+            cb_ids_in_use.insert(config.cb_name);
+            cb_names.push_back(config.cb_name);
+            cb_configs.push_back(config);
+        }
+    }
+
+    if (update_only) {
+        // Done before any UI exists: --update_only stops the application after the update, as
+        // documented in --help - no bridges are managed and no dashboard is started.
+        return run_update_only(cb_configs);
     }
 
     auto effective_status_output_mode = status_output_mode;
@@ -220,23 +420,6 @@ int main(int argc, char* argv[]) {
                      "Use --status-output=log for plain log output without a dashboard."
                   << std::endl;
     }
-    for (auto const& elem : config_files) {
-        auto config_list = utilities::parse_config_multi(elem);
-        if (config_list.empty()) {
-            return EXIT_FAILURE;
-        }
-
-        for (auto const& config : config_list) {
-            if (cb_ids_in_use.count(config.cb_name) > 0) {
-                std::cerr << "Duplicate charge_bridge::name '" << config.cb_name << "'" << std::endl;
-                return EXIT_FAILURE;
-            }
-
-            cb_ids_in_use.insert(config.cb_name);
-            cb_names.push_back(config.cb_name);
-            cb_configs.push_back(config);
-        }
-    }
 
     status_ui ui(effective_ui_options, cb_names);
     // Quitting the terminal UI (q / Ctrl-C) must shut down the whole application. ftxui installs its
@@ -255,35 +438,9 @@ int main(int argc, char* argv[]) {
     }
     std::vector<std::unique_ptr<::charge_bridge::charge_bridge>> cb_handler;
 
-    bool update_only_ok = true;
     for (auto const& config : cb_configs) {
         print_charge_bridge_config(config);
         cb_handler.push_back(std::make_unique<::charge_bridge::charge_bridge>(config, status_sink, tick_sink));
-        auto& cb = *cb_handler.rbegin();
-
-        if (mode_of_operation == mode::update_only) {
-            // Signal handlers are installed already, so let Ctrl-C interrupt the upload here too. The
-            // status UI is not running yet, so the upload's progress goes to plain stdout (the print
-            // sink is installed by ui.run(), see status_ui::run()).
-            update_only_ok =
-                cb->update_firmware(true, []() { return not g_run_application.load(); }) and update_only_ok;
-            if (not g_run_application.load()) {
-                // Aborted: do not construct and update the remaining instances.
-                update_only_ok = false;
-                break;
-            }
-        }
-    }
-
-    if (mode_of_operation == mode::update_only) {
-        // --update_only stops the application after the update, as documented in --help: no bridges are
-        // managed and no dashboard is started. cb_handler's manager threads were never started, so
-        // clearing it here only tears the (idle) bridges down.
-        cb_handler.clear();
-        if (auto const signum = g_shutdown_signal.load(); signum != 0) {
-            std::cout << "\nSignal " << signum << " received. Firmware update stopped." << std::endl;
-        }
-        return update_only_ok ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
     ui.run();
