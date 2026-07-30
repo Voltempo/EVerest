@@ -510,7 +510,7 @@ SecurityEvent_External to_external_api(SecurityEvent_Internal const& val) {
     result.type = val.type;
     result.info = val.info;
     result.critical = val.critical;
-    result.timestamp = result.timestamp;
+    result.timestamp = val.timestamp;
     return result;
 }
 
