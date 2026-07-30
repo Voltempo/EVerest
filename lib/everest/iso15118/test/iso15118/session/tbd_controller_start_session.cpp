@@ -223,8 +223,7 @@ SCENARIO("session_start functionality") {
 
         // Create a V2GTP message (8-byte header + SupportedAppProtocolReq EXI payload) and send it
         // through the client end of the socketpair.
-        const auto request_frame =
-            make_v2gtp_frame(iso15118::io::v2gtp::PayloadType::SAP, sap_req, sizeof(sap_req));
+        const auto request_frame = make_v2gtp_frame(iso15118::io::v2gtp::PayloadType::SAP, sap_req, sizeof(sap_req));
         const auto written = ::write(fds.at(1), request_frame.data(), request_frame.size());
 
         // Wait for the SupportedAppProtocolRes the server writes back.
