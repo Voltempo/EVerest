@@ -528,6 +528,80 @@ StatusInfoType_External to_external_api(StatusInfoType_Internal const& val) {
     return result;
 }
 
+OperationalStatusEnumType_Internal to_internal_api(OperationalStatusEnumType_External const& val) {
+    using SrcT = OperationalStatusEnumType_External;
+    using TarT = OperationalStatusEnumType_Internal;
+    switch (val) {
+        enum_case(Inoperative);
+        enum_case(Operative);
+    }
+    throw std::out_of_range(
+        "Unexpected value for everest::lib::API::V1_0::types::ocpp::OperationalStatusEnumType_External");
+}
+
+OperationalStatusEnumType_External to_external_api(OperationalStatusEnumType_Internal const& val) {
+    using SrcT = OperationalStatusEnumType_Internal;
+    using TarT = OperationalStatusEnumType_External;
+    switch (val) {
+        enum_case(Inoperative);
+        enum_case(Operative);
+    }
+    throw std::out_of_range(
+        "Unexpected value for everest::lib::API::V1_0::types::ocpp::OperationalStatusEnumType_Internal");
+}
+
+ChangeAvailabilityStatusEnumType_Internal to_internal_api(ChangeAvailabilityStatusEnumType_External const& val) {
+    using SrcT = ChangeAvailabilityStatusEnumType_External;
+    using TarT = ChangeAvailabilityStatusEnumType_Internal;
+    switch (val) {
+        enum_case(Accepted);
+        enum_case(Rejected);
+        enum_case(Scheduled);
+    }
+    throw std::out_of_range(
+        "Unexpected value for everest::lib::API::V1_0::types::ocpp::ChangeAvailabilityStatusEnumType_External");
+}
+
+ChangeAvailabilityStatusEnumType_External to_external_api(ChangeAvailabilityStatusEnumType_Internal const& val) {
+    using SrcT = ChangeAvailabilityStatusEnumType_Internal;
+    using TarT = ChangeAvailabilityStatusEnumType_External;
+    switch (val) {
+        enum_case(Accepted);
+        enum_case(Rejected);
+        enum_case(Scheduled);
+    }
+    throw std::out_of_range(
+        "Unexpected value for everest::lib::API::V1_0::types::ocpp::ChangeAvailabilityStatusEnumType_Internal");
+}
+
+ChangeAvailabilityRequest_Internal to_internal_api(ChangeAvailabilityRequest_External const& val) {
+    ChangeAvailabilityRequest_Internal result;
+    result.operational_status = to_internal_api(val.operational_status);
+    result.evse = optToInternal(val.evse);
+    return result;
+}
+
+ChangeAvailabilityRequest_External to_external_api(ChangeAvailabilityRequest_Internal const& val) {
+    ChangeAvailabilityRequest_External result;
+    result.operational_status = to_external_api(val.operational_status);
+    result.evse = optToExternal(val.evse);
+    return result;
+}
+
+ChangeAvailabilityResponse_Internal to_internal_api(ChangeAvailabilityResponse_External const& val) {
+    ChangeAvailabilityResponse_Internal result;
+    result.status = to_internal_api(val.status);
+    result.status_info = optToInternal(val.status_info);
+    return result;
+}
+
+ChangeAvailabilityResponse_External to_external_api(ChangeAvailabilityResponse_Internal const& val) {
+    ChangeAvailabilityResponse_External result;
+    result.status = to_external_api(val.status);
+    result.status_info = optToExternal(val.status_info);
+    return result;
+}
+
 BootNotificationResponse_Internal to_internal_api(BootNotificationResponse_External const& val) {
     BootNotificationResponse_Internal result;
     result.status = to_internal_api(val.status);
