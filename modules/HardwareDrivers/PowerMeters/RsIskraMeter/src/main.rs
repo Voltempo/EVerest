@@ -996,7 +996,7 @@ impl generated::OnReadySubscriber for IskraMeter {
         }
 
         let ready_state_clone = ready_state.clone();
-        let power_meter_clone = publishers.meter.clone();
+        let power_meter_clone = publishers.main.clone();
         let interval_ms = self.read_meter_values_interval_ms;
 
         let backoff = ConstantBuilder::default()

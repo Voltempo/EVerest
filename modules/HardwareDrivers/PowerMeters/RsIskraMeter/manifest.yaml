@@ -52,7 +52,7 @@ config:
     default: 5000
     minimum: 1000
 provides:
-  meter:
+  main:
     description: Implementation of the driver functionality
     interface: powermeter
 requires:
