@@ -1421,14 +1421,24 @@ async def test_iso15118_dc_stop_transaction_during_cable_check(
     Test that stopping the transaction on request (regular Local/Remote stop) while the
     cable check is still running does not raise a cable check fault: the cable check is
     aborted because of the requested stop, which is a regular termination and must not
-    surface as MREC11CableCheckFault/Inoperative to the user.
+    surface as MREC11CableCheckFault/Inoperative to the user. The session must still wind
+    down cleanly with a TransactionFinished event (StoppingCharging -> Finished), without
+    the D-LINK_ERROR of the dying HLC session restarting SLAC matching.
     """
-    probe_module, session_event_mock, _, _ = await setup_session_mocks(
+    probe_module, session_event_mock, powermeter_mock, _ = await setup_session_mocks(
         test_controller, everest_core
     )
     error_raised_mock, _ = setup_error_monitoring(probe_module, "evse_manager")
     imd_measurement_mock = Mock()
     probe_module.subscribe_variable("imd", "isolation_measurement", imd_measurement_mock)
+
+    # Run a complete charging session first: the state machine only arms the HLC stop
+    # handling (hlc_charging_active) when the Idle state is re-entered, so only from the
+    # second session on does a stop during cable check take the HLC stop path that must
+    # end in StoppingCharging -> Finished (and not in a SLAC matching restart).
+    await run_basic_session(test_controller, session_event_mock, powermeter_mock, "plug_in_dc_iso")
+    await asyncio.sleep(3)
+    imd_measurement_mock.reset_mock()
 
     test_controller.plug_in_dc_iso()
 
