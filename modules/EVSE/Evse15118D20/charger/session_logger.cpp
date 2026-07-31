@@ -48,19 +48,29 @@ std::ostream& operator<<(std::ostream& os, const iso15118::session::logging::Exi
 class SessionLog {
 public:
     SessionLog(const std::string& file_name) : file(file_name.c_str(), std::ios::out) {
+        // Session logging must never be fatal to the charging session itself.
         if (not file.good()) {
-            throw std::runtime_error("Failed to open file " + file_name + " for writing iso15118 session log");
+            EVLOG_warning << "Failed to open file " << file_name
+                          << " for writing iso15118 session log, session logging disabled";
+            return;
         }
 
+        active = true;
         EVLOG_info << "Created logfile at: " << file_name;
     }
     void operator()(const iso15118::session::logging::SimpleEvent& event) {
+        if (not active) {
+            return;
+        }
         file << "- type: INFO\n";
         add_timestamp(event.time_point);
         file << "  info: \"" << event.info << "\"\n";
     }
 
     void operator()(const iso15118::session::logging::ExiMessageEvent& event) {
+        if (not active) {
+            return;
+        }
         file << "- type: EXI\n";
         add_timestamp(event.time_point);
         file << "  direction: " << event.direction << "\n";
@@ -69,11 +79,15 @@ public:
     }
 
     void flush() {
+        if (not active) {
+            return;
+        }
         file.flush();
     }
 
 private:
     std::fstream file;
+    bool active{false};
 
     void add_timestamp(const iso15118::session::logging::TimePoint& timestamp) {
         if (not timestamp_initialized) {
@@ -117,9 +131,12 @@ private:
 };
 
 SessionLogger::SessionLogger(std::filesystem::path output_dir_) : output_dir(std::filesystem::absolute(output_dir_)) {
-    // FIXME (aw): this is quite brute force ...
-    if (not std::filesystem::exists(output_dir)) {
-        std::filesystem::create_directory(output_dir);
+    std::error_code ec;
+    if (not std::filesystem::exists(output_dir, ec)) {
+        std::filesystem::create_directories(output_dir, ec);
+        if (ec) {
+            EVLOG_warning << "Could not create iso15118 session log directory " << output_dir << ": " << ec.message();
+        }
     }
 
     iso15118::session::logging::set_session_log_callback([this](std::uintptr_t id, const LogEvent& event) {
