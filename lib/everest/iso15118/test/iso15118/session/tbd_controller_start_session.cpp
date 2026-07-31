@@ -200,7 +200,7 @@ RoundTripResult run_start_session_round_trip(iso15118::TbdController& controller
 
 template <typename Response>
 Response require_response(const std::optional<std::vector<uint8_t>>& response,
-                           iso15118::io::v2gtp::PayloadType payload_type) {
+                          iso15118::io::v2gtp::PayloadType payload_type) {
     constexpr std::size_t header_size = iso15118::io::SdpPacket::V2GTP_HEADER_SIZE;
 
     REQUIRE(response.has_value());
@@ -307,11 +307,12 @@ SCENARIO("session_start functionality") {
     WHEN("start_session") {
         // Drive one full round-trip: send a SupportedAppProtocolReq and read the response.
         const auto result = run_start_session_round_trip(controller, fds, iso15118::io::v2gtp::PayloadType::SAP,
-                                                          sap_req, sizeof(sap_req), false);
+                                                         sap_req, sizeof(sap_req), false);
 
         THEN("the server answers with a valid SupportedAppProtocolRes and the session ends cleanly") {
             REQUIRE_FALSE(result.timed_out);
-            REQUIRE(result.written == static_cast<ssize_t>(iso15118::io::SdpPacket::V2GTP_HEADER_SIZE + sizeof(sap_req)));
+            REQUIRE(result.written ==
+                    static_cast<ssize_t>(iso15118::io::SdpPacket::V2GTP_HEADER_SIZE + sizeof(sap_req)));
 
             const auto sap_res = require_response<iso15118::message_20::SupportedAppProtocolResponse>(
                 result.response, iso15118::io::v2gtp::PayloadType::SAP);
@@ -342,7 +343,7 @@ SCENARIO("session_start functionality - skip sap") {
         // Drive one full round-trip with app-protocol negotiation skipped: send a SessionSetupReq
         // straight away and read the response.
         const auto result = run_start_session_round_trip(controller, fds, iso15118::io::v2gtp::PayloadType::Part20Main,
-                                                          session_setup_req, sizeof(session_setup_req), true);
+                                                         session_setup_req, sizeof(session_setup_req), true);
 
         THEN("the server answers with a valid SessionSetupRes and the session ends cleanly") {
             REQUIRE_FALSE(result.timed_out);
