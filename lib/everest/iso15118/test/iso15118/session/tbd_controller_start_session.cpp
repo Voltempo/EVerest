@@ -6,7 +6,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
-#include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -128,6 +127,101 @@ std::optional<std::vector<uint8_t>> read_v2gtp_frame(int fd, std::chrono::millis
     return buffer;
 }
 
+class SessionWatchdog {
+public:
+    SessionWatchdog(iso15118::TbdController& controller, std::chrono::seconds timeout) {
+        thread = std::thread([this, &controller, timeout] {
+            std::unique_lock<std::mutex> lock(mutex);
+            if (not cv.wait_for(lock, timeout, [this] { return done; })) {
+                timed_out_flag.store(true);
+                controller.shutdown();
+            }
+        });
+    }
+
+    ~SessionWatchdog() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            done = true;
+        }
+        cv.notify_all();
+        thread.join();
+    }
+
+    SessionWatchdog(const SessionWatchdog&) = delete;
+    SessionWatchdog& operator=(const SessionWatchdog&) = delete;
+
+    bool timed_out() const {
+        return timed_out_flag.load();
+    }
+
+private:
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done{false};
+    std::atomic_bool timed_out_flag{false};
+    std::thread thread;
+};
+
+struct RoundTripResult {
+    bool ok{false};
+    ssize_t written{0};
+    std::optional<std::vector<uint8_t>> response;
+    bool timed_out{false};
+};
+
+RoundTripResult run_start_session_round_trip(iso15118::TbdController& controller, std::array<int, 2>& fds,
+                                             iso15118::io::v2gtp::PayloadType payload_type, const uint8_t* req,
+                                             std::size_t req_len, bool skip_app_protocol_negotiation) {
+    RoundTripResult result;
+
+    std::thread start_session_thread([&] {
+        if (skip_app_protocol_negotiation) {
+            result.ok = controller.start_session(fds.at(0), true);
+        } else {
+            result.ok = controller.start_session(fds.at(0));
+        }
+    });
+
+    SessionWatchdog watchdog(controller, std::chrono::seconds(20));
+
+    const auto request_frame = make_v2gtp_frame(payload_type, req, req_len);
+    result.written = ::write(fds.at(1), request_frame.data(), request_frame.size());
+
+    result.response = read_v2gtp_frame(fds.at(1), std::chrono::seconds(5));
+
+    close(fds.at(1));
+    controller.shutdown();
+    start_session_thread.join();
+
+    result.timed_out = watchdog.timed_out();
+    return result;
+}
+
+template <typename Response>
+Response require_response(const std::optional<std::vector<uint8_t>>& response,
+                           iso15118::io::v2gtp::PayloadType payload_type) {
+    constexpr std::size_t header_size = iso15118::io::SdpPacket::V2GTP_HEADER_SIZE;
+
+    REQUIRE(response.has_value());
+    REQUIRE(response->size() > header_size);
+    REQUIRE(response->at(0) == iso15118::io::SDP_PROTOCOL_VERSION);
+    REQUIRE(response->at(1) == iso15118::io::SDP_INVERSE_PROTOCOL_VERSION);
+
+    uint16_t response_type{};
+    std::memcpy(&response_type, response->data() + 2, sizeof(response_type));
+    REQUIRE(ntohs(response_type) == static_cast<uint16_t>(payload_type));
+
+    const uint8_t* payload = response->data() + header_size;
+    const std::size_t payload_len = response->size() - header_size;
+
+    const iso15118::io::StreamInputView view{payload, payload_len};
+    const iso15118::message_20::Variant variant(payload_type, view);
+    REQUIRE(variant.get_type() == iso15118::message_20::TypeTrait<Response>::type);
+
+    return variant.get<Response>();
+}
+
 } // namespace
 
 SCENARIO("session_start guard check - invalid/closed fd") {
@@ -208,79 +302,25 @@ SCENARIO("session_start functionality") {
 
     auto controller = make_controller(false, callbacks);
 
-    const auto fds = make_nonblocking_socketpair();
-
-    bool ok{false};
+    auto fds = make_nonblocking_socketpair();
 
     WHEN("start_session") {
-        std::thread start_session_thread([&] { ok = controller.start_session(fds.at(0)); });
-
-        // Watchdog: if start_session() never returns (e.g. the session fails to finish), force it out
-        // with shutdown() so the test cannot hang forever. Stays armed across the join below.
-        std::mutex watchdog_mutex;
-        std::condition_variable watchdog_cv;
-        bool watchdog_done{false};
-        std::atomic_bool timed_out{false};
-        std::thread watchdog_thread([&] {
-            std::unique_lock<std::mutex> lock(watchdog_mutex);
-            if (not watchdog_cv.wait_for(lock, std::chrono::seconds(20), [&] { return watchdog_done; })) {
-                timed_out.store(true);
-                controller.shutdown();
-            }
-        });
-
-        // Create a V2GTP message (8-byte header + SupportedAppProtocolReq EXI payload) and send it
-        // through the client end of the socketpair.
-        const auto request_frame = make_v2gtp_frame(iso15118::io::v2gtp::PayloadType::SAP, sap_req, sizeof(sap_req));
-        const auto written = ::write(fds.at(1), request_frame.data(), request_frame.size());
-
-        // Wait for the SupportedAppProtocolRes the server writes back.
-        const auto response = read_v2gtp_frame(fds.at(1), std::chrono::seconds(5));
-
-        // Tear down before asserting: closing the client end signals EOF to the server, so its session
-        // finishes and start_session() returns. shutdown() is a belt-and-suspenders unblock. Both
-        // worker threads are joined here so no assertion below can throw with a thread still running.
-        close(fds.at(1));
-        controller.shutdown();
-        start_session_thread.join();
-
-        {
-            std::lock_guard<std::mutex> lock(watchdog_mutex);
-            watchdog_done = true;
-        }
-        watchdog_cv.notify_all();
-        watchdog_thread.join();
+        // Drive one full round-trip: send a SupportedAppProtocolReq and read the response.
+        const auto result = run_start_session_round_trip(controller, fds, iso15118::io::v2gtp::PayloadType::SAP,
+                                                          sap_req, sizeof(sap_req), false);
 
         THEN("the server answers with a valid SupportedAppProtocolRes and the session ends cleanly") {
-            REQUIRE_FALSE(timed_out.load());
-            REQUIRE(written == static_cast<ssize_t>(request_frame.size()));
+            REQUIRE_FALSE(result.timed_out);
+            REQUIRE(result.written == static_cast<ssize_t>(iso15118::io::SdpPacket::V2GTP_HEADER_SIZE + sizeof(sap_req)));
 
-            // The response is a well-formed V2GTP SAP frame.
-            constexpr std::size_t header_size = iso15118::io::SdpPacket::V2GTP_HEADER_SIZE;
-            REQUIRE(response.has_value());
-            REQUIRE(response->size() > header_size);
-            REQUIRE(response->at(0) == iso15118::io::SDP_PROTOCOL_VERSION);
-            REQUIRE(response->at(1) == iso15118::io::SDP_INVERSE_PROTOCOL_VERSION);
-
-            uint16_t response_type{};
-            std::memcpy(&response_type, response->data() + 2, sizeof(response_type));
-            REQUIRE(ntohs(response_type) == static_cast<uint16_t>(iso15118::io::v2gtp::PayloadType::SAP));
-
-            // Decode the payload to a SupportedAppProtocolResponse via the library Variant.
-            const uint8_t* payload = response->data() + header_size;
-            const std::size_t payload_len = response->size() - header_size;
-
-            const iso15118::io::StreamInputView view{payload, payload_len};
-            const iso15118::message_20::Variant variant(iso15118::io::v2gtp::PayloadType::SAP, view);
-            REQUIRE(variant.get_type() == iso15118::message_20::Type::SupportedAppProtocolRes);
-
-            const auto& sap_res = variant.get<iso15118::message_20::SupportedAppProtocolResponse>();
+            const auto sap_res = require_response<iso15118::message_20::SupportedAppProtocolResponse>(
+                result.response, iso15118::io::v2gtp::PayloadType::SAP);
             REQUIRE(sap_res.response_code ==
                     iso15118::message_20::SupportedAppProtocolResponse::ResponseCode::OK_SuccessfulNegotiation);
             REQUIRE(sap_res.schema_id.has_value());
 
             // start_session() returned true and reaped the session; ConnectionPlain::close() closed the fd.
-            REQUIRE(ok);
+            REQUIRE(result.ok);
             REQUIRE_FALSE(controller.has_active_session());
             REQUIRE_FALSE(fd_is_open(fds.at(0)));
         }
@@ -289,103 +329,33 @@ SCENARIO("session_start functionality") {
 }
 
 SCENARIO("session_start functionality - skip sap") {
-    iso15118::session::logging::set_session_log_callback(
-        [](std::size_t, const iso15118::session::logging::Event& event) {
-            if (const auto* simple_event = std::get_if<iso15118::session::logging::SimpleEvent>(&event)) {
-                std::cout << "log(session: simple event): " << simple_event->info << "\n";
-            } else {
-                std::cout << "log(session): not decoded\n";
-            }
-        });
-
-    iso15118::io::set_logging_callback([](iso15118::LogLevel level, const std::string& message) {
-        std::cout << "log(" << static_cast<int>(level) << "): " << message << "\n";
-    });
+    iso15118::session::logging::set_session_log_callback([](std::size_t, const auto&) {});
 
     iso15118::session::feedback::Callbacks callbacks;
     callbacks.signal = [](auto) {};
 
     auto controller = make_controller(false, callbacks);
 
-    const auto fds = make_nonblocking_socketpair();
-
-    bool ok{false};
+    auto fds = make_nonblocking_socketpair();
 
     WHEN("start_session - skip sap") {
-        std::thread start_session_thread([&] { ok = controller.start_session(fds.at(0), true); });
-
-        // Watchdog: if start_session() never returns (e.g. the session fails to finish), force it out
-        // with shutdown() so the test cannot hang forever. Stays armed across the join below.
-        std::mutex watchdog_mutex;
-        std::condition_variable watchdog_cv;
-        bool watchdog_done{false};
-        std::atomic_bool timed_out{false};
-        std::thread watchdog_thread([&] {
-            std::unique_lock<std::mutex> lock(watchdog_mutex);
-            if (not watchdog_cv.wait_for(lock, std::chrono::seconds(20), [&] { return watchdog_done; })) {
-                timed_out.store(true);
-                controller.shutdown();
-            }
-        });
-
-        // Create a V2GTP message (8-byte header + SessionSetupReq EXI payload) and send it
-        // through the client end of the socketpair.
-        const auto request_frame = make_v2gtp_frame(iso15118::io::v2gtp::PayloadType::Part20Main, session_setup_req,
-                                                    sizeof(session_setup_req));
-        const auto written = ::write(fds.at(1), request_frame.data(), request_frame.size());
-
-        // Wait for the SessionSetupRes the server writes back.
-        const auto response = read_v2gtp_frame(fds.at(1), std::chrono::seconds(5));
-
-        // Tear down before asserting: closing the client end signals EOF to the server, so its session
-        // finishes and start_session() returns. shutdown() is a belt-and-suspenders unblock. Both
-        // worker threads are joined here so no assertion below can throw with a thread still running.
-        close(fds.at(1));
-        controller.shutdown();
-        start_session_thread.join();
-
-        {
-            std::lock_guard<std::mutex> lock(watchdog_mutex);
-            watchdog_done = true;
-        }
-        watchdog_cv.notify_all();
-        watchdog_thread.join();
+        // Drive one full round-trip with app-protocol negotiation skipped: send a SessionSetupReq
+        // straight away and read the response.
+        const auto result = run_start_session_round_trip(controller, fds, iso15118::io::v2gtp::PayloadType::Part20Main,
+                                                          session_setup_req, sizeof(session_setup_req), true);
 
         THEN("the server answers with a valid SessionSetupRes and the session ends cleanly") {
-            REQUIRE_FALSE(timed_out.load());
-            REQUIRE(written == static_cast<ssize_t>(request_frame.size()));
+            REQUIRE_FALSE(result.timed_out);
+            REQUIRE(result.written ==
+                    static_cast<ssize_t>(iso15118::io::SdpPacket::V2GTP_HEADER_SIZE + sizeof(session_setup_req)));
 
-            // The response is a well-formed V2GTP SAP frame.
-            constexpr std::size_t header_size = iso15118::io::SdpPacket::V2GTP_HEADER_SIZE;
-            REQUIRE(response.has_value());
-            REQUIRE(response->size() > header_size);
-            REQUIRE(response->at(0) == iso15118::io::SDP_PROTOCOL_VERSION);
-            REQUIRE(response->at(1) == iso15118::io::SDP_INVERSE_PROTOCOL_VERSION);
-
-            uint16_t response_type{};
-            std::memcpy(&response_type, response->data() + 2, sizeof(response_type));
-            REQUIRE(ntohs(response_type) == static_cast<uint16_t>(iso15118::io::v2gtp::PayloadType::Part20Main));
-
-            // Decode the payload to a SessionSetupRes via the library Variant.
-            const uint8_t* payload = response->data() + header_size;
-            const std::size_t payload_len = response->size() - header_size;
-
-            std::cout << "Payload len: " << payload_len << "\n";
-
-            for (size_t i = 0; i < payload_len; i++) {
-                std::cout << std::hex << static_cast<uint32_t>(payload[i]) << "\n";
-            }
-
-            const iso15118::io::StreamInputView view{payload, payload_len};
-            const iso15118::message_20::Variant variant(iso15118::io::v2gtp::PayloadType::Part20Main, view);
-            REQUIRE(variant.get_type() == iso15118::message_20::Type::SessionSetupRes);
-
-            const auto& session_setup_res = variant.get<iso15118::message_20::SessionSetupResponse>();
+            const auto session_setup_res = require_response<iso15118::message_20::SessionSetupResponse>(
+                result.response, iso15118::io::v2gtp::PayloadType::Part20Main);
             REQUIRE(session_setup_res.response_code ==
                     iso15118::message_20::datatypes::ResponseCode::OK_NewSessionEstablished);
 
             // start_session() returned true and reaped the session; ConnectionPlain::close() closed the fd.
-            REQUIRE(ok);
+            REQUIRE(result.ok);
             REQUIRE_FALSE(controller.has_active_session());
             REQUIRE_FALSE(fd_is_open(fds.at(0)));
         }
