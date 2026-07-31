@@ -17,9 +17,23 @@ active_modules:
       energy_consumer:
         - module_id: probe
           implementation_id: energy_consumer_probe
+        - module_id: connector_1
+          implementation_id: energy_grid
       powermeter:
         - module_id: probe
           implementation_id: powermeter_probe
+  connector_1:
+    module: EvseManager
+    config_module:
+      connector_id: 1
+      phase_rotation_grid_side: '312'
+    connections:
+      bsp:
+        - module_id: probe
+          implementation_id: bsp_probe
+      powermeter_grid_side:
+        - module_id: probe
+          implementation_id: powermeter_grid_side_probe
   energy_manager:
     module: EnergyManager
     connections:
