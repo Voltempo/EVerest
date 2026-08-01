@@ -209,6 +209,15 @@ private:
     /// \return Mapping of spawned child pid to module id.
     std::map<pid_t, std::string> handle_start_modules(const RuntimeContext& ctx);
 
+    /// \brief Run the "EVerest is up and running" completion sequence: clear retained startup topics,
+    /// log readiness, transition to Running and announce readiness via the status fifo and global
+    /// ready topic. Used both when all modules report ready and when there are no modules to start.
+    /// \return true if the manager transitioned to Running; false if it was skipped because a
+    /// shutdown is already in progress.
+    bool transition_to_running_and_announce(Everest::MQTTAbstraction& mqtt_abstraction,
+                                            Everest::StatusFifo& status_fifo, const std::string& mqtt_everest_prefix,
+                                            bool retain_topics);
+
     /// \brief Advance lifecycle state when current phase is complete.
     /// \param ctx Runtime dependencies for the current run.
     /// \param admin_panel Controller IPC/process integration helper.

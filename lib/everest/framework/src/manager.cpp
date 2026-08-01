@@ -1106,6 +1106,38 @@ bool Manager::is_idle() const {
 
 // ---- Event loop dispatch handlers ------------------------------------------
 
+bool Manager::transition_to_running_and_announce(MQTTAbstraction& mqtt_abstraction, StatusFifo& status_fifo,
+                                                 const std::string& mqtt_everest_prefix, bool retain_topics) {
+    if (not retain_topics) {
+        EVLOG_info << "Clearing retained topics published by manager during startup";
+        mqtt_abstraction.clear_retained_topics();
+    } else {
+        EVLOG_info << "Keeping retained topics published by manager during startup for inspection";
+    }
+    const auto complete_end_time = std::chrono::steady_clock::now();
+    EVLOG_info << fmt::format(
+        TERMINAL_STYLE_OK, "🚙🚙🚙 All modules are initialized. EVerest up and running [{}ms] 🚙🚙🚙",
+        std::chrono::duration_cast<std::chrono::milliseconds>(complete_end_time - module_startup_start_time_).count());
+
+    bool goto_running_transition = true;
+    {
+        const std::lock_guard<std::mutex> state_lock(state_transition_mutex_);
+        if (sigint_received_ || is_in_shutdown_flow_state_unlocked()) {
+            EVLOG_info << "All modules reported ready while shutdown is already in progress. "
+                          "Skipping transition to Running.";
+            goto_running_transition = false;
+        }
+    }
+    if (goto_running_transition) {
+        transition_to_unlocked(ManagerState::Running);
+        status_fifo.update(StatusFifo::ALL_MODULES_STARTED);
+        MqttMessagePayload payload{MqttMessageType::GlobalReady, nlohmann::json(true)};
+        mqtt_abstraction.publish(fmt::format("{}ready", mqtt_everest_prefix), payload);
+    }
+
+    return goto_running_transition;
+}
+
 /// \brief Handle module startup by publishing metadata, registering handlers, and spawning module processes.
 std::map<pid_t, std::string> Manager::handle_start_modules(const RuntimeContext& ctx) {
     BOOST_LOG_FUNCTION();
@@ -1114,7 +1146,11 @@ std::map<pid_t, std::string> Manager::handle_start_modules(const RuntimeContext&
     const auto& module_configurations = config.get_module_configurations();
     if (module_configurations.size() == 0) {
         EVLOG_info << "List of modules to start is empty";
-        transition_to(ManagerState::Idle);
+        // There is nothing to wait for, so EVerest is trivially up: run the normal completion path
+        // so the manager ends in the Running state (instead of dropping back to Idle) and announces
+        // readiness just as it would once all modules report ready.
+        transition_to_running_and_announce(ctx.mqtt_abstraction, ctx.status_fifo, ctx.ms.mqtt_settings.everest_prefix,
+                                           ctx.retain_topics);
         return {};
     }
     transition_to(ManagerState::StartingModules);
@@ -1192,38 +1228,7 @@ std::map<pid_t, std::string> Manager::handle_start_modules(const RuntimeContext&
             }();
 
             if (all_modules_ready) {
-                const auto complete_end_time = std::chrono::steady_clock::now();
-                if (not retain_topics) {
-                    EVLOG_info << "Clearing retained topics published by manager during startup";
-                    mqtt_abstraction.clear_retained_topics();
-                } else {
-                    EVLOG_info << "Keeping retained topics published by manager during startup for inspection";
-                }
-                EVLOG_info << fmt::format(TERMINAL_STYLE_OK,
-                                          "🚙🚙🚙 All modules are initialized. EVerest up and running [{}ms] 🚙🚙🚙",
-                                          std::chrono::duration_cast<std::chrono::milliseconds>(
-                                              complete_end_time - module_startup_start_time_)
-                                              .count());
-
-                bool skip_running_transition = false;
-                {
-                    const std::lock_guard<std::mutex> state_lock(state_transition_mutex_);
-                    if (sigint_received_ || is_in_shutdown_flow_state_unlocked()) {
-                        EVLOG_info << "All modules reported ready while shutdown is already in progress. "
-                                      "Skipping transition to Running.";
-                        skip_running_transition = true;
-                    } else {
-                        transition_to_unlocked(ManagerState::Running);
-                    }
-                }
-                if (skip_running_transition) {
-                    return;
-                }
-
-                status_fifo.update(StatusFifo::ALL_MODULES_STARTED);
-                MqttMessagePayload payload{MqttMessageType::GlobalReady, nlohmann::json(true)};
-
-                mqtt_abstraction.publish(fmt::format("{}ready", mqtt_everest_prefix), payload);
+                transition_to_running_and_announce(mqtt_abstraction, status_fifo, mqtt_everest_prefix, retain_topics);
             } else if (!standalone_modules.empty()) {
                 if (modules_spawned == modules_ready_count - standalone_modules.size()) {
                     EVLOG_info << fmt::format(fg(fmt::terminal_color::green),
