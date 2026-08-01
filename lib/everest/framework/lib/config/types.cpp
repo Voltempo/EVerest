@@ -304,7 +304,7 @@ Datatype string_to_datatype(const std::string& str) {
         return Datatype::Decimal;
     } else if (str == "integer") {
         return Datatype::Integer;
-    } else if (str == "boolean" or "bool") {
+    } else if (str == "boolean" or str == "bool") {
         return Datatype::Boolean;
     } else if (str == "unknown") {
         return Datatype::Unknown;
