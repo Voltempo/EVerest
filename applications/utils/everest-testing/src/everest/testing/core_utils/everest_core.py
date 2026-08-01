@@ -251,7 +251,11 @@ class EverestCore:
         everest_configuration_adjustment_strategies.append(
             EverestMqttConfigurationAdjustmentStrategy(everest_uuid=self.everest_uuid,
                                                        mqtt_external_prefix=self.mqtt_external_prefix))
-        everest_config = yaml.safe_load(template_config_path.read_text())
+        # An empty config file (or one that is only comments/whitespace) parses to None; normalize
+        # to a mapping with an empty active_modules so the adjustment strategies below (which assume
+        # that key exists) can operate on it.
+        everest_config = yaml.safe_load(template_config_path.read_text()) or {}
+        everest_config.setdefault("active_modules", {})
         for strategy in everest_configuration_adjustment_strategies:
             everest_config = strategy.adjust_everest_configuration(everest_config)
         with self.everest_config_path.open("w") as f:
