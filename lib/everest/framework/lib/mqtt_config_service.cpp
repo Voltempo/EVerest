@@ -251,7 +251,12 @@ Response handle_set_request(const SetRequest& set_request, const std::string& or
             response.status = ResponseStatus::Error;
         }
     } else {
-        set_response.status_info = results.parameter_results.value().front().status_info;
+        // Surface the per-parameter explanation (e.g. a module's runtime veto reason) to the caller.
+        // The client reads the outer Response.status_info, so populate it here and keep the inner
+        // SetResponse.status_info in sync. The AccessDenied/DoesNotExist cases below override it with
+        // a more specific message.
+        response.status_info = results.parameter_results.value().front().status_info;
+        set_response.status_info = response.status_info;
         switch (results.parameter_results.value().front().status) {
         case Everest::config::SetConfigParameterResultEnum::Applied:
             set_response.status = SetResponseStatus::Accepted;
@@ -802,11 +807,12 @@ void from_json(const nlohmann::json& j, GetResponse& r) {
 }
 
 void to_json(nlohmann::json& j, const SetResponse& r) {
-    j = {{"status", conversions::set_response_status_to_string(r.status)}};
+    j = {{"status", conversions::set_response_status_to_string(r.status)}, {"status_info", r.status_info}};
 }
 
 void from_json(const nlohmann::json& j, SetResponse& r) {
     r.status = conversions::string_to_set_response_status(j.at("status"));
+    r.status_info = j.value("status_info", "");
 }
 
 void to_json(nlohmann::json& j, const Request& r) {
