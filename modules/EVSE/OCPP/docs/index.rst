@@ -443,7 +443,11 @@ The following module configuration parameters are relevant for device model back
   `lib/everest/ocpp/config/v16_to_v2_mapping.md <https://github.com/EVerest/everest-core/blob/main/lib/everest/ocpp/config/v16_to_v2_mapping.md>`_
 * **Ocpp16NetworkConfigSlot**: ``NetworkConfiguration`` slot number that OCPP 1.6 network connection
   details (``CentralSystemURI``, ``SecurityProfile``, ``AuthorizationKey``, ``HostName``,
-  ``ChargePointId``) are migrated to during the one-time migration (default: ``1``; set to ``0`` to skip)
+  ``ChargePointId``) are migrated to during the one-time migration (default: ``1``; set to ``0`` to skip).
+  The migration pins the slot's ``OcppInterface`` to ``"Any"`` unless the component config sets an explicit
+  attribute value, points ``OCPPCommCtrlr/ActiveNetworkProfile`` at the slot, and requires a
+  ``NetworkConfiguration_<N>`` component config for the slot (missing: the network part is skipped with an
+  error log)
 * **EnableDeviceModelFallbackToLegacyJson**: if ``true`` and device model initialization or integrity check
   fails at startup, the module falls back to the legacy JSON backend; requires **ChargePointConfigPath** to
   exist (default: ``false``)
