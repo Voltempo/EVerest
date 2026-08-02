@@ -235,8 +235,10 @@ DuplicateSlotResult SqliteConfigSlotManager::duplicate_slot(int source_slot_id,
         {
             auto s = this->db->new_statement(
                 "INSERT INTO MODULE_FULFILLMENT "
-                "(CONFIG_ID, MODULE_ID, REQUIREMENT_NAME, IMPLEMENTATION_ID, IMPLEMENTATION_MODULE_ID) "
-                "SELECT ?, MODULE_ID, REQUIREMENT_NAME, IMPLEMENTATION_ID, IMPLEMENTATION_MODULE_ID "
+                "(CONFIG_ID, MODULE_ID, REQUIREMENT_NAME, REQUIREMENT_INDEX, IMPLEMENTATION_ID, "
+                "IMPLEMENTATION_MODULE_ID) "
+                "SELECT ?, MODULE_ID, REQUIREMENT_NAME, REQUIREMENT_INDEX, IMPLEMENTATION_ID, "
+                "IMPLEMENTATION_MODULE_ID "
                 "FROM MODULE_FULFILLMENT WHERE CONFIG_ID = ?;");
             s->bind_int(1, new_id);
             s->bind_int(2, source_slot_id);

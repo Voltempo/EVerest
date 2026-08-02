@@ -27,6 +27,31 @@ ModuleConfigurations get_example_module_configs() {
     fulfillment.requirement = {"requirement_id1", 0};
     module_config.connections.insert({"connection1", {fulfillment}});
 
+    // Two fulfillments of the same requirement, listed in an order that does not match how the
+    // database would sort them (module1 first, even though "example_module" < "module1"). The
+    // index is deliberately left at its default so the write path has to derive it from the
+    // position in this vector.
+    Fulfillment evse_manager_1;
+    evse_manager_1.module_id = "module1";
+    evse_manager_1.implementation_id = "evse";
+    evse_manager_1.requirement = {"evse_manager"};
+
+    Fulfillment evse_manager_2;
+    evse_manager_2.module_id = "example_module";
+    evse_manager_2.implementation_id = "evse";
+    evse_manager_2.requirement = {"evse_manager"};
+
+    module_config.connections.insert({"evse_manager", {evse_manager_1, evse_manager_2}});
+
+    // A second requirement sorting before "evse_manager", to catch an index that is not reset
+    // per requirement.
+    Fulfillment auth_fulfillment;
+    auth_fulfillment.module_id = "example_module";
+    auth_fulfillment.implementation_id = "main";
+    auth_fulfillment.requirement = {"auth"};
+
+    module_config.connections.insert({"auth", {auth_fulfillment}});
+
     Mapping module_mapping = {1};
     Mapping impl_mapping = {1, 1};
 
@@ -130,6 +155,31 @@ TEST_CASE("Database operations", "[db_operation]") {
         auto response = storage.get_module_configs();
         REQUIRE(response.status == GenericResponseStatus::OK);
         REQUIRE(response.module_configs.size() == 2);
+    }
+    SECTION("Fulfillment order within a requirement survives the round trip") {
+        auto response = storage.get_module_config("example_module");
+        REQUIRE(response.status == GenericResponseStatus::OK);
+        REQUIRE(response.config.has_value());
+
+        const auto& connections = response.config.value().connections;
+
+        const auto evse_manager = connections.find("evse_manager");
+        REQUIRE(evse_manager != connections.end());
+        REQUIRE(evse_manager->second.size() == 2);
+
+        // as listed in the config, not sorted by module id
+        CHECK(evse_manager->second.at(0).module_id == "module1");
+        CHECK(evse_manager->second.at(1).module_id == "example_module");
+
+        // the index is the position within this requirement
+        CHECK(evse_manager->second.at(0).requirement.index == 0);
+        CHECK(evse_manager->second.at(1).requirement.index == 1);
+
+        // and it restarts for every requirement, rather than continuing across the module
+        const auto auth = connections.find("auth");
+        REQUIRE(auth != connections.end());
+        REQUIRE(auth->second.size() == 1);
+        CHECK(auth->second.at(0).requirement.index == 0);
     }
     SECTION("Configuration parameters can be retrieved") {
         auto response1 = storage.get_configuration_parameter({"example_module", "integer_param"});

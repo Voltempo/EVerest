@@ -423,17 +423,21 @@ GenericResponseStatus SqliteStorage::write_module_config_items(const ModuleConfi
         }
 
         for (const auto& [requirement_id, connections] : module.connections) {
+            // the position within the requirement is significant, requirements are resolved
+            // positionally, so it has to be persisted alongside the fulfillment
+            size_t requirement_index = 0;
             for (const auto& connection : connections) {
                 Fulfillment fulfillment;
                 fulfillment.module_id = connection.module_id;
                 fulfillment.implementation_id = connection.implementation_id;
-                fulfillment.requirement = {requirement_id};
+                fulfillment.requirement = {requirement_id, requirement_index};
 
                 if (this->write_module_fulfillment(module_id, fulfillment) != GenericResponseStatus::OK) {
                     EVLOG_error << "Failed to write module fulfillment for module: " << module_id
                                 << " and requirement: " << requirement_id;
                     return GenericResponseStatus::Failed;
                 }
+                requirement_index++;
             }
         }
 
@@ -519,16 +523,17 @@ GenericResponseStatus SqliteStorage::write_module_data(const ModuleData& module_
 GenericResponseStatus SqliteStorage::write_module_fulfillment(const std::string& module_id,
                                                               const Fulfillment& fulfillment) {
     const std::string sql =
-        "INSERT OR REPLACE INTO MODULE_FULFILLMENT (CONFIG_ID, MODULE_ID, REQUIREMENT_NAME, IMPLEMENTATION_ID, "
-        "IMPLEMENTATION_MODULE_ID) VALUES (?,?,?,?,?)";
+        "INSERT OR REPLACE INTO MODULE_FULFILLMENT (CONFIG_ID, MODULE_ID, REQUIREMENT_NAME, REQUIREMENT_INDEX, "
+        "IMPLEMENTATION_ID, IMPLEMENTATION_MODULE_ID) VALUES (?,?,?,?,?,?)";
 
     auto stmt = this->db->new_statement(sql);
 
     stmt->bind_int(1, config_id_);
     stmt->bind_text(2, module_id);
     stmt->bind_text(3, fulfillment.requirement.id);
-    stmt->bind_text(4, fulfillment.implementation_id);
-    stmt->bind_text(5, fulfillment.module_id);
+    stmt->bind_int(4, static_cast<int>(fulfillment.requirement.index));
+    stmt->bind_text(5, fulfillment.implementation_id);
+    stmt->bind_text(6, fulfillment.module_id);
 
     if (stmt->step() != SQLITE_DONE) {
         return GenericResponseStatus::Failed;
@@ -770,22 +775,21 @@ GetModuleDataResponse SqliteStorage::get_module_data(const std::string& module_i
 GetModuleFulfillmentsResponse SqliteStorage::get_module_fulfillments(const std::string& module_id) {
     GetModuleFulfillmentsResponse response;
 
-    const std::string sql =
-        "SELECT REQUIREMENT_NAME, IMPLEMENTATION_ID, IMPLEMENTATION_MODULE_ID FROM MODULE_FULFILLMENT "
-        "WHERE CONFIG_ID = @config_id AND MODULE_ID = @module_id";
+    const std::string sql = "SELECT REQUIREMENT_NAME, IMPLEMENTATION_ID, IMPLEMENTATION_MODULE_ID, REQUIREMENT_INDEX "
+                            "FROM MODULE_FULFILLMENT "
+                            "WHERE CONFIG_ID = @config_id AND MODULE_ID = @module_id "
+                            "ORDER BY REQUIREMENT_NAME, REQUIREMENT_INDEX";
 
     auto stmt = this->db->new_statement(sql);
     stmt->bind_int("@config_id", config_id_);
     stmt->bind_text("@module_id", module_id);
 
-    size_t index = 0;
     while (stmt->step() == SQLITE_ROW) {
         Fulfillment fulfillment;
-        fulfillment.requirement = {stmt->column_text(0), index};
+        fulfillment.requirement = {stmt->column_text(0), static_cast<size_t>(stmt->column_int(3))};
         fulfillment.implementation_id = stmt->column_text(1);
         fulfillment.module_id = stmt->column_text(2);
         response.module_fulfillments.push_back(fulfillment);
-        index++;
     }
 
     response.status = GenericResponseStatus::OK; // FIXME: when to return failed?
