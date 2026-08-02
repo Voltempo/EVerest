@@ -15,11 +15,13 @@ use std::time::Duration;
 /// Handle to a running EVerest manager process.
 ///
 /// The manager is spawned as a subprocess using `{prefix}/bin/manager`. When
-/// dropped, the manager process is killed if it is still running.
+/// dropped, the manager process is killed if it is still running and its
+/// configuration database is removed.
 pub struct Manager {
     child: Arc<Mutex<Child>>,
     stopping: Arc<AtomicBool>,
     watcher: Option<thread::JoinHandle<()>>,
+    db_path: PathBuf,
 }
 
 impl Manager {
@@ -45,6 +47,20 @@ impl Manager {
         let mut cmd = Command::new(&binary);
         cmd.arg("--prefix").arg(prefix);
         cmd.arg("--config").arg(config);
+
+        // Each instance needs its own configuration database. Without --db the manager
+        // defaults to `{prefix}/everest.db`, and `prefix` is the runfiles root shared by
+        // every test in a test binary, so tests running in parallel would race each other
+        // applying the migration files to one database.
+        let db_name = match mqtt_everest_prefix {
+            Some(p) => format!("everest-{}.db", p.replace('/', "_")),
+            None => format!("everest-{}.db", std::process::id()),
+        };
+        let db_path = std::env::temp_dir().join(db_name);
+        // A leftover database would make the manager boot from the stored config slot
+        // instead of seeding from the config file this instance was given.
+        let _ = std::fs::remove_file(&db_path);
+        cmd.arg("--db").arg(&db_path);
 
         if let Some(mqtt_prefix) = mqtt_everest_prefix {
             cmd.arg("--mqtt_everest_prefix").arg(mqtt_prefix);
@@ -130,6 +146,7 @@ impl Manager {
             child,
             stopping,
             watcher,
+            db_path,
         })
     }
 
@@ -143,7 +160,11 @@ impl Drop for Manager {
     fn drop(&mut self) {
         self.stopping.store(true, Ordering::Relaxed);
         let _ = self.child.lock().unwrap().kill();
-        if let Err(panic) = self.watcher.take().expect("always there").join() {
+        let watcher = self.watcher.take().expect("always there").join();
+        // Remove the database before propagating a watcher panic, so a failing test does
+        // not leave one behind for the next run.
+        let _ = std::fs::remove_file(&self.db_path);
+        if let Err(panic) = watcher {
             std::panic::resume_unwind(panic);
         }
     }
