@@ -29,7 +29,6 @@ const auto ISO15118_PNC_VENDOR_ID = "org.openchargealliance.iso15118pnc";
 const auto CALIFORNIA_PRICING_VENDOR_ID = "org.openchargealliance.costmsg";
 const auto CLIENT_CERTIFICATE_TIMER_INTERVAL = std::chrono::hours(12);
 const auto V2G_CERTIFICATE_TIMER_INTERVAL = std::chrono::hours(12);
-const auto OCSP_REQUEST_TIMER_INTERVAL = std::chrono::hours(12);
 const auto INITIAL_CERTIFICATE_REQUESTS_DELAY = std::chrono::seconds(60);
 const auto DEFAULT_MESSAGE_QUEUE_SIZE_THRESHOLD = 1000;
 const auto DEFAULT_BOOT_NOTIFICATION_INTERVAL_S = 60; // fallback interval if BootNotification returns interval of 0.
@@ -180,7 +179,8 @@ ChargePointImpl::ChargePointImpl(
             }
 
             c->previous_status = status;
-        });
+        },
+        this->configuration.getReportClearedErrors().value_or(false));
 
     for (int id = 0; id <= this->configuration.getNumberOfConnectors(); id++) {
         this->connectors.insert(std::make_pair(id, std::make_shared<Connector>(id)));
@@ -214,7 +214,13 @@ ChargePointImpl::ChargePointImpl(
             };
         this->ocsp_request_timer = std::make_unique<Everest::SteadyTimer>(&this->io_context, [this]() {
             this->update_ocsp_cache();
-            this->ocsp_request_timer->interval(OCSP_REQUEST_TIMER_INTERVAL);
+            int32_t ocsp_request_interval = 604800; // default to 12 hours if not configured
+            try {
+                ocsp_request_interval = this->configuration.getOcspRequestInterval();
+            } catch (const std::runtime_error& e) {
+                EVLOG_error << "OCSP request interval could not be loaded (Using default 168 hours): " << e.what();
+            }
+            this->ocsp_request_timer->interval(std::chrono::seconds(ocsp_request_interval));
         });
     }
 
@@ -1140,7 +1146,7 @@ bool ChargePointImpl::init(const std::map<int, ChargePointStatus>& connector_sta
 }
 
 bool ChargePointImpl::start(const std::map<int, ChargePointStatus>& connector_status_map, BootReasonEnum bootreason,
-                            const std::set<std::string>& resuming_session_ids) {
+                            const std::set<std::string>& resuming_session_ids, bool start_connecting) {
     if (!this->initialized) {
         init(connector_status_map, resuming_session_ids);
     }
@@ -1149,7 +1155,9 @@ bool ChargePointImpl::start(const std::map<int, ChargePointStatus>& connector_st
     this->publish_default_price(true);
     this->connectivity_manager->set_message_callback(
         [this](const std::string& message) { this->message_callback(message); });
-    this->connectivity_manager->connect();
+    if (start_connecting && !this->connectivity_manager->is_websocket_connected()) {
+        this->connectivity_manager->connect();
+    }
     this->boot_notification();
     this->call_set_connection_timeout();
 
@@ -2059,7 +2067,7 @@ void ChargePointImpl::handleClearCacheRequest(ocpp::Call<ClearCacheRequest> call
 
     ClearCacheResponse response;
 
-    if (this->configuration.getAuthorizationCacheEnabled()) {
+    if (this->configuration.getAuthorizationCacheEnabled().value_or(false)) {
         try {
             this->database_handler->clear_authorization_cache();
             response.status = ClearCacheStatus::Accepted;
@@ -2137,10 +2145,17 @@ void ChargePointImpl::handleGetConfigurationRequest(ocpp::Call<GetConfigurationR
 void ChargePointImpl::handleRemoteStartTransactionRequest(ocpp::Call<RemoteStartTransactionRequest> call) {
     EVLOG_debug << "Received RemoteStartTransactionRequest: " << call.msg << "\nwith messageId: " << call.uniqueId;
 
-    // a charge point may reject a remote start transaction request without a connectorId
-    // TODO(kai): what is our policy here? reject for now
     RemoteStartTransactionResponse response;
     std::vector<std::int32_t> referenced_connectors;
+
+    if (!call.msg.connectorId.has_value() and
+        this->configuration.getRejectRemoteStartTransactionWithoutConnectorId().value_or(false)) {
+        EVLOG_warning << "Rejecting RemoteStartTransactionRequest without connector id";
+        response.status = RemoteStartStopStatus::Rejected;
+        const ocpp::CallResult<RemoteStartTransactionResponse> call_result(response, call.uniqueId);
+        this->message_dispatcher->dispatch_call_result(call_result);
+        return;
+    }
 
     if (call.msg.connectorId) {
         if (call.msg.connectorId.value() <= 0 or
@@ -2161,6 +2176,7 @@ void ChargePointImpl::handleRemoteStartTransactionRequest(ocpp::Call<RemoteStart
 
     // Check if at least one conenctor is able to execute RemoteStart (obtainable == true).
     bool obtainable = true;
+    std::optional<std::int32_t> first_obtainable_connector;
     for (const auto connector : referenced_connectors) {
         obtainable = true;
 
@@ -2190,6 +2206,7 @@ void ChargePointImpl::handleRemoteStartTransactionRequest(ocpp::Call<RemoteStart
 
         if (obtainable) {
             // at least one connector can do the remote start
+            first_obtainable_connector = connector;
             break;
         }
     }
@@ -2200,6 +2217,12 @@ void ChargePointImpl::handleRemoteStartTransactionRequest(ocpp::Call<RemoteStart
         const ocpp::CallResult<RemoteStartTransactionResponse> call_result(response, call.uniqueId);
         this->message_dispatcher->dispatch_call_result(call_result);
         return;
+    }
+
+    if (!call.msg.connectorId.has_value() and
+        this->configuration.getRemoteStartTransactionWithoutConnectorIdFindFirst().value_or(false)) {
+        // only reference the first connector that is able to execute the remote start
+        referenced_connectors = {first_obtainable_connector.value()};
     }
 
     if (call.msg.chargingProfile) {
@@ -2222,26 +2245,14 @@ void ChargePointImpl::handleRemoteStartTransactionRequest(ocpp::Call<RemoteStart
         }
     }
 
-    {
-        std::vector<std::int32_t> referenced_connectors;
+    response.status = RemoteStartStopStatus::Accepted;
+    const ocpp::CallResult<RemoteStartTransactionResponse> call_result(response, call.uniqueId);
+    this->message_dispatcher->dispatch_call_result(call_result);
 
-        if (!call.msg.connectorId) {
-            for (int connector = 1; connector <= this->configuration.getNumberOfConnectors(); connector++) {
-                referenced_connectors.push_back(connector);
-            }
-        } else {
-            referenced_connectors.push_back(call.msg.connectorId.value());
-        }
-
-        response.status = RemoteStartStopStatus::Accepted;
-        const ocpp::CallResult<RemoteStartTransactionResponse> call_result(response, call.uniqueId);
-        this->message_dispatcher->dispatch_call_result(call_result);
-
-        if (this->configuration.getAuthorizeRemoteTxRequests()) {
-            this->provide_token_callback(call.msg.idTag.get(), referenced_connectors, false);
-        } else {
-            this->provide_token_callback(call.msg.idTag.get(), referenced_connectors, true); // prevalidated
-        }
+    if (this->configuration.getAuthorizeRemoteTxRequests()) {
+        this->provide_token_callback(call.msg.idTag.get(), referenced_connectors, false);
+    } else {
+        this->provide_token_callback(call.msg.idTag.get(), referenced_connectors, true); // prevalidated
     }
 }
 
@@ -3532,7 +3543,7 @@ EnhancedIdTagInfo ChargePointImpl::authorize_id_token(CiString<20> id_token, con
             }
         }
 
-        if (this->configuration.getAuthorizationCacheEnabled()) {
+        if (this->configuration.getAuthorizationCacheEnabled().value_or(false)) {
             if (this->validate_against_cache_entries(id_token)) {
                 try {
                     const auto auth_cache_entry = this->database_handler->get_authorization_cache_entry(id_token);
@@ -4439,7 +4450,8 @@ void ChargePointImpl::on_transaction_started(const std::int32_t& connector, cons
 void ChargePointImpl::on_transaction_stopped(const std::int32_t connector, const std::string& session_id,
                                              const Reason& reason, ocpp::DateTime timestamp, float energy_wh_import,
                                              std::optional<CiString<20>> id_tag_end,
-                                             std::optional<std::string> signed_meter_value) {
+                                             std::optional<std::string> signed_meter_value,
+                                             std::optional<std::string> start_signed_meter_value) {
     auto transaction = this->transaction_handler->get_transaction(connector);
     if (transaction == nullptr) {
         EVLOG_error << "Trying to stop a transaction that is unknown on connector: " << connector
@@ -4448,6 +4460,27 @@ void ChargePointImpl::on_transaction_stopped(const std::int32_t connector, const
     }
     if (connector <= 0 or connector > this->connectors.size()) {
         EVLOG_error << "Attempting to stop transaction for invalid connector id: " << connector;
+    }
+
+    if (start_signed_meter_value.has_value()) {
+        // Some meters only provide the start signed value at stop time.
+        // Add a new Transaction.Begin entry only if one does not yet exist
+        auto has_start_entry = false;
+        const auto existing_meter_values = transaction->get_meter_values();
+        for (const auto& mv : existing_meter_values) {
+            for (const auto& sv : mv.sampledValue) {
+                if (sv.format == ValueFormat::SignedData && sv.context == ReadingContext::Transaction_Begin) {
+                    has_start_entry = true;
+                    break;
+                }
+            }
+        }
+        if (!has_start_entry) {
+            const auto start_meter_value =
+                get_signed_meter_value(start_signed_meter_value.value(), ReadingContext::Transaction_Begin,
+                                       transaction->get_start_energy_wh()->timestamp);
+            transaction->add_meter_value(start_meter_value);
+        }
     }
 
     if (signed_meter_value) {
@@ -4648,7 +4681,7 @@ void ChargePointImpl::on_firmware_update_status_notification(std::int32_t reques
                 request_id, false, disable_connectors_during_install);
         } else {
             this->firmware_status_notification(
-                ocpp::conversions::firmware_status_notification_to_firmware_status(firmware_update_status),
+                ocpp::conversions::firmware_status_notification_to_firmware_status(firmware_update_status), false,
                 disable_connectors_during_install);
         }
     } catch (const std::out_of_range& e) {

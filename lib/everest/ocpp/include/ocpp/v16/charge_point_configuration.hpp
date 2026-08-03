@@ -178,6 +178,9 @@ public:
     std::optional<bool> getQueueAllMessages() override;
     std::optional<KeyValue> getQueueAllMessagesKeyValue() override;
 
+    std::optional<bool> getReportClearedErrors() override;
+    std::optional<KeyValue> getReportClearedErrorsKeyValue() override;
+
     std::optional<std::string> getMessageTypesDiscardForQueueing() override;
     std::optional<KeyValue> getMessageTypesDiscardForQueueingKeyValue() override;
 
@@ -474,6 +477,14 @@ public:
     std::optional<bool> getAllowChargingProfileWithoutStartSchedule() override;
     void setAllowChargingProfileWithoutStartSchedule(bool allow) override;
     std::optional<KeyValue> getAllowChargingProfileWithoutStartScheduleKeyValue() override;
+
+    std::optional<bool> getRejectRemoteStartTransactionWithoutConnectorId() override;
+    void setRejectRemoteStartTransactionWithoutConnectorId(bool reject) override;
+    std::optional<KeyValue> getRejectRemoteStartTransactionWithoutConnectorIdKeyValue() override;
+
+    std::optional<bool> getRemoteStartTransactionWithoutConnectorIdFindFirst() override;
+    void setRemoteStartTransactionWithoutConnectorIdFindFirst(bool find_first) override;
+    std::optional<KeyValue> getRemoteStartTransactionWithoutConnectorIdFindFirstKeyValue() override;
 
     std::int32_t getWaitForStopTransactionsOnResetTimeout() override;
     void setWaitForStopTransactionsOnResetTimeout(std::int32_t wait_for_stop_transactions_on_reset_timeout) override;

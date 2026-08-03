@@ -87,10 +87,16 @@ MQTTAbstractionImpl::MQTTAbstractionImpl(const MQTTSettings& mqtt_settings) :
 }
 
 MQTTAbstractionImpl::~MQTTAbstractionImpl() {
-    if (this->running.load()) {
-        this->disconnect();
-    }
-    // this->mqtt_mainloop_thread.join();
+    // Signal the main loop to stop (if it is still running). The actual
+    // mqtt_client->disconnect() runs on the main loop thread itself, which is joined when
+    // the mqtt_mainloop_thread member is destroyed.
+    this->disconnect();
+
+    // Stop and join all MessageHandler worker threads before the remaining members are
+    // destroyed. A worker thread may still be executing a handler; joining here guarantees
+    // no handler runs against a partially-destroyed object. stop() is idempotent, so calling
+    // it again (here and in ~MessageHandler()) is safe.
+    this->message_handler.stop();
 }
 
 bool MQTTAbstractionImpl::connect() {
@@ -122,10 +128,19 @@ bool MQTTAbstractionImpl::connect() {
 void MQTTAbstractionImpl::disconnect() {
     BOOST_LOG_FUNCTION();
 
+    // Only signal the main loop to stop; do NOT call mqtt_client->disconnect() here.
+    // disconnect() can be invoked from arbitrary threads (e.g. the external MQTT worker
+    // thread via Everest::handle_shutdown(), or the main thread during teardown). The
+    // actual mqtt_client->disconnect() is performed by the main loop thread after
+    // ev_handler.run() returns (see spawn_main_loop_thread()), keeping all mqtt_client
+    // access on a single thread and avoiding a concurrent-access / use-after-free crash.
+    this->running = false;
     this->disconnect_event.notify();
+}
 
-    // FIXME(kai): always set connected to false for the moment
-    this->mqtt_is_connected = false;
+void MQTTAbstractionImpl::stop_message_handling() {
+    BOOST_LOG_FUNCTION();
+    this->message_handler.stop();
 }
 
 void MQTTAbstractionImpl::publish(const std::string& topic, const json& json) {
@@ -180,6 +195,44 @@ void MQTTAbstractionImpl::publish(const std::string& topic, const std::string& d
 
     EVLOG_verbose << fmt::format("publishing to topic: {} with payload: {} and qos: {} and retain: {}", topic, data,
                                  static_cast<int>(qos), static_cast<int>(retain));
+}
+
+bool MQTTAbstractionImpl::set_lwt(const std::string& topic, const json& json, QOS qos, bool retain) {
+    BOOST_LOG_FUNCTION();
+
+    return set_lwt(topic, json.dump(), qos, retain);
+}
+
+bool MQTTAbstractionImpl::set_lwt(const std::string& topic, const std::string& data, QOS qos, bool retain) {
+    BOOST_LOG_FUNCTION();
+
+    if (topic.empty()) {
+        EVLOG_warning << "Ignoring last-will-testament with empty topic";
+        return false;
+    }
+
+    // An MQTT connection allows only a single last-will-testament, and it must be registered before connect().
+    if (this->mqtt_is_connected) {
+        EVLOG_error << "Cannot set last-will-testament after the MQTT connection has been established";
+        return false;
+    }
+    if (this->lwt_set) {
+        EVLOG_error << "A last-will-testament has already been set; it can only be set once";
+        return false;
+    }
+
+    const auto mqtt_qos = to_io_qos(qos, everest::lib::io::mqtt::mqtt_client::QoS::at_most_once);
+    const auto error = this->mqtt_client->set_will(topic, data, mqtt_qos, retain, {});
+    if (error != everest::lib::io::mqtt::ErrorCode::Success) {
+        EVLOG_error << "MQTT error while setting last-will-testament";
+        // leave lwt_set false so a corrected call may retry
+        return false;
+    }
+
+    this->lwt_set = true;
+    EVLOG_verbose << fmt::format("set last-will-testament on topic: {} with payload: {} and qos: {} and retain: {}",
+                                 topic, data, static_cast<int>(qos), static_cast<int>(retain));
+    return true;
 }
 
 void MQTTAbstractionImpl::subscribe(const std::string& topic) {
@@ -323,6 +376,15 @@ std::shared_future<void> MQTTAbstractionImpl::spawn_main_loop_thread() {
                                                     [this](const auto&) { on_mqtt_message(); });
 
             this->ev_handler.run(this->running);
+
+            // The loop has been asked to stop (running == false). Perform the actual MQTT
+            // disconnect here, on the loop-owning thread, so that mqtt_client is never
+            // accessed concurrently from another thread (disconnect() only signals; see
+            // disconnect()).
+            if (this->mqtt_client) {
+                this->mqtt_client->disconnect();
+            }
+            this->mqtt_is_connected = false;
         } catch (boost::exception& e) {
             EVLOG_critical << fmt::format("Caught MQTT mainloop boost::exception:\n{}",
                                           boost::diagnostic_information(e, true));
@@ -411,6 +473,15 @@ void MQTTAbstractionImpl::on_mqtt_connect() {
 
 void MQTTAbstractionImpl::on_mqtt_disconnect() {
     BOOST_LOG_FUNCTION();
+
+    // On intentional shutdown running is set to false (by disconnect()) before the main loop
+    // thread performs mqtt_client->disconnect(), so the resulting disconnect callback must be
+    // ignored instead of being treated as a broker crash.
+    if (!this->running.load()) {
+        EVLOG_info << "MQTT disconnect ignored (intentional shutdown)";
+        this->mqtt_is_connected = false;
+        return;
+    }
 
     EVLOG_AND_THROW(EverestInternalError("Lost connection to MQTT broker"));
 }

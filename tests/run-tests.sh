@@ -21,12 +21,16 @@ set -euo pipefail
 #   eebus           EEBUS integration tests
 #
 # Options:
+#   -x                   stop on first error
+#   -k PATTERN           run tests that match PATTERN
 #   -j N                 Parallel workers (default: nproc)
 #   --serial             Run tests serially
 #   --everest-prefix P   EVerest install prefix (default: <repo>/build/dist)
 #   --junitxml PATH      JUnit XML output (default: result.xml)
 #   --html PATH          HTML report output (default: report.html)
 #   --no-isolation       Disable network isolation
+#   --ocpp-impl V        OCPP module(s) to test: both (default), legacy, multi
+#   --                   Pass remaining args directly to pytest (e.g. -k ...)
 #   -h, --help           Show this help
 #
 # Environment variables:
@@ -42,11 +46,15 @@ PYTHON="${PYTHON_INTERPRETER:-python3}"
 # Defaults
 WORKERS="${PARALLEL_TESTS:-$(nproc)}"
 SERIAL=false
+STOP_ON_ERROR=false
+PATTERN=
 PREFIX="${EVEREST_PREFIX:-${EVEREST_CORE_DIR}/build/dist}"
 JUNITXML="result.xml"
 HTML="report.html"
 ISOLATION="${NETWORK_ISOLATION:-true}"
 SUITE=""
+EXTRA_PYTEST_ARGS=()
+OCPP_IMPL="both"
 
 usage() {
     sed -n '3,/^$/s/^# \?//p' "$0"
@@ -56,11 +64,15 @@ usage() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -j)                WORKERS="$2"; shift 2;;
+        -k)                PATTERN="$2"; shift 2;;
+        -x)                STOP_ON_ERROR=true; shift;;
         --serial)          SERIAL=true; shift;;
         --everest-prefix)  PREFIX="$2"; shift 2;;
         --junitxml)        JUNITXML="$2"; shift 2;;
         --html)            HTML="$2"; shift 2;;
         --no-isolation)    ISOLATION=false; shift;;
+        --ocpp-impl)       OCPP_IMPL="$2"; shift 2;;
+        --)                shift; EXTRA_PYTEST_ARGS+=("$@"); break;;
         -h|--help)         usage;;
         -*)                echo "Unknown option: $1" >&2; exit 1;;
         *)                 SUITE="$1"; shift;;
@@ -72,6 +84,11 @@ if [[ -z "$SUITE" ]]; then
     echo "Run '$(basename "$0") --help' for usage." >&2
     exit 1
 fi
+
+case "$OCPP_IMPL" in
+    both|legacy|multi) ;;
+    *) echo "Error: --ocpp-impl must be one of: both, legacy, multi (got '$OCPP_IMPL')." >&2; exit 1;;
+esac
 
 echo "Suite:   $SUITE"
 echo "Python:  $PYTHON"
@@ -129,7 +146,49 @@ else
     echo "Workers: serial"
 fi
 
+if [[ "$STOP_ON_ERROR" == "true" ]]; then
+    echo "Stopping on first error"
+    PYTEST_ARGS+=(-x)
+fi
+
+if [[ "N$PATTERN" != "N" ]]; then
+    echo "running tests that match: $PATTERN"
+    PYTEST_ARGS+=(-k "$PATTERN")
+fi
+
 [[ -n "$ISOLATION_FLAG" ]] && PYTEST_ARGS+=("$ISOLATION_FLAG")
+
+if [[ ${#EXTRA_PYTEST_ARGS[@]} -gt 0 ]]; then
+    echo "Pytest passthrough args: ${EXTRA_PYTEST_ARGS[*]}"
+fi
+
+explicit_pytest_targets=()
+for arg in "${EXTRA_PYTEST_ARGS[@]}"; do
+    # Only treat clear test selectors as explicit targets.
+    # This avoids picking option values (e.g. after -o) as paths.
+    if [[ "$arg" == *"::"* || "$arg" == *.py || "$arg" == */* ]]; then
+        explicit_pytest_targets+=("$arg")
+    fi
+done
+
+# --ocpp-impl is registered in ocpp_tests/conftest.py, so it is only passed
+# to suites that include OCPP targets (via SUITE_PYTEST_ARGS below).
+OCPP_IMPL_ARGS=(--ocpp-impl "$OCPP_IMPL")
+SUITE_PYTEST_ARGS=()
+
+run_pytest_suite() {
+    local default_targets=("$@")
+    local selected_targets=("${default_targets[@]}")
+    if [[ ${#explicit_pytest_targets[@]} -gt 0 ]]; then
+        selected_targets=("${explicit_pytest_targets[@]}")
+    fi
+
+    "$PYTHON" -m pytest "${PYTEST_ARGS[@]}" \
+        "${SUITE_PYTEST_ARGS[@]}" \
+        "${EXTRA_PYTEST_ARGS[@]}" \
+        --junitxml="$JUNITXML" --html="$HTML" \
+        "${selected_targets[@]}"
+}
 
 # OCPP setup (certs + configs)
 setup_ocpp() {
@@ -149,8 +208,8 @@ case "$SUITE" in
 
         setup_ocpp
 
-        "$PYTHON" -m pytest "${PYTEST_ARGS[@]}" \
-            --junitxml="$JUNITXML" --html="$HTML" \
+        SUITE_PYTEST_ARGS=("${OCPP_IMPL_ARGS[@]}")
+        run_pytest_suite \
             core_tests/*.py \
             framework_tests/*.py \
             async_api_tests/*.py \
@@ -162,8 +221,7 @@ case "$SUITE" in
 
     integration)
         cd "$SCRIPT_DIR"
-        "$PYTHON" -m pytest "${PYTEST_ARGS[@]}" \
-            --junitxml="$JUNITXML" --html="$HTML" \
+        run_pytest_suite \
             core_tests/*.py \
             framework_tests/*.py \
             async_api_tests/*.py \
@@ -172,30 +230,27 @@ case "$SUITE" in
 
     core)
         cd "$SCRIPT_DIR"
-        "$PYTHON" -m pytest "${PYTEST_ARGS[@]}" \
-            --junitxml="$JUNITXML" --html="$HTML" \
+        run_pytest_suite \
             core_tests/*.py
         ;;
 
     framework)
         cd "$SCRIPT_DIR"
-        "$PYTHON" -m pytest "${PYTEST_ARGS[@]}" \
-            --junitxml="$JUNITXML" --html="$HTML" \
+        run_pytest_suite \
             framework_tests/*.py
         ;;
 
     asyncapi)
         cd "$SCRIPT_DIR"
-        "$PYTHON" -m pytest "${PYTEST_ARGS[@]}" \
-            --junitxml="$JUNITXML" --html="$HTML" \
+        run_pytest_suite \
             async_api_tests/*.py
         ;;
 
     ocpp)
         setup_ocpp
         cd "$SCRIPT_DIR"
-        "$PYTHON" -m pytest "${PYTEST_ARGS[@]}" \
-            --junitxml="$JUNITXML" --html="$HTML" \
+        SUITE_PYTEST_ARGS=("${OCPP_IMPL_ARGS[@]}")
+        run_pytest_suite \
             ocpp_tests/test_sets/ocpp16/*.py \
             ocpp_tests/test_sets/ocpp201/*.py \
             ocpp_tests/test_sets/ocpp21/*.py
@@ -204,24 +259,24 @@ case "$SUITE" in
     ocpp16)
         setup_ocpp
         cd "$SCRIPT_DIR"
-        "$PYTHON" -m pytest "${PYTEST_ARGS[@]}" \
-            --junitxml="$JUNITXML" --html="$HTML" \
+        SUITE_PYTEST_ARGS=("${OCPP_IMPL_ARGS[@]}")
+        run_pytest_suite \
             ocpp_tests/test_sets/ocpp16/*.py
         ;;
 
     ocpp201)
         setup_ocpp
         cd "$SCRIPT_DIR"
-        "$PYTHON" -m pytest "${PYTEST_ARGS[@]}" \
-            --junitxml="$JUNITXML" --html="$HTML" \
+        SUITE_PYTEST_ARGS=("${OCPP_IMPL_ARGS[@]}")
+        run_pytest_suite \
             ocpp_tests/test_sets/ocpp201/*.py
         ;;
 
     ocpp21)
         setup_ocpp
         cd "$SCRIPT_DIR"
-        "$PYTHON" -m pytest "${PYTEST_ARGS[@]}" \
-            --junitxml="$JUNITXML" --html="$HTML" \
+        SUITE_PYTEST_ARGS=("${OCPP_IMPL_ARGS[@]}")
+        run_pytest_suite \
             ocpp_tests/test_sets/ocpp21/*.py
         ;;
 

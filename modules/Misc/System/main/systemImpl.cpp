@@ -51,6 +51,13 @@ fs::path create_temp_file(const fs::path& dir, const std::string& prefix) {
     return fn_template_buffer.data();
 }
 
+bool split_key_value(const std::string& key_value, std::string& key, std::string& value) {
+    std::stringstream line_stream(key_value);
+    bool split_ok = !std::getline(line_stream, key, '=').fail();
+    split_ok = split_ok && !std::getline(line_stream, value, '=').fail();
+    return split_ok;
+}
+
 void systemImpl::init() {
     this->scripts_path = mod->info.paths.libexec;
     this->log_upload_running = false;
@@ -83,8 +90,12 @@ void systemImpl::standard_firmware_update(const types::system::FirmwareUpdateReq
     this->update_firmware_thread = std::thread([this, firmware_update_request, firmware_file_path, constants]() {
         const auto firmware_updater = this->scripts_path / FIRMWARE_UPDATER;
 
-        const std::vector<std::string> args = {constants.string(), firmware_update_request.location,
-                                               firmware_file_path.string()};
+        const auto separator = firmware_update_request.location.find('#');
+        const auto location = firmware_update_request.location.substr(0, separator);
+        const auto metadata_fragment =
+            separator == std::string::npos ? std::string() : firmware_update_request.location.substr(separator + 1);
+
+        const std::vector<std::string> args = {constants.string(), location, firmware_file_path.string()};
         int32_t retries = 0;
         const auto total_retries = firmware_update_request.retries.value_or(this->mod->config.DefaultRetries);
         const auto retry_interval =
@@ -94,6 +105,22 @@ void systemImpl::standard_firmware_update(const types::system::FirmwareUpdateReq
         types::system::FirmwareUpdateStatus firmware_status;
         firmware_status.request_id = -1;
         firmware_status.firmware_update_status = firmware_status_enum;
+
+        std::map<std::string, std::string> parsed_fragment;
+        std::stringstream fragment_stream(metadata_fragment);
+        std::string fragment_key_value;
+        while (std::getline(fragment_stream, fragment_key_value, '&')) {
+            std::string key;
+            std::string value;
+            if (split_key_value(fragment_key_value, key, value)) {
+                parsed_fragment[key] = value;
+            }
+        }
+        if (parsed_fragment.count("disable_connectors_during_install") != 0) {
+            types::system::FirmwareUpdateMetadata metadata;
+            metadata.disable_connectors_during_install = parsed_fragment["disable_connectors_during_install"] == "true";
+            firmware_status.firmware_update_metadata.emplace(metadata);
+        }
 
         while (firmware_status.firmware_update_status == types::system::FirmwareUpdateStatusEnum::DownloadFailed &&
                retries < total_retries) {
@@ -283,13 +310,9 @@ void systemImpl::download_signed_firmware(const types::system::FirmwareUpdateReq
                                 return CmdControl::Continue;
                             }
 
-                            std::stringstream line_stream(output_line);
                             std::string key;
                             std::string value;
-                            bool split_ok = !std::getline(line_stream, key, '=').fail();
-                            split_ok = split_ok && !std::getline(line_stream, value, '=').fail();
-
-                            if (!split_ok) {
+                            if (!split_key_value(output_line, key, value)) {
                                 EVLOG_error << "Firmware metadata parser returned invalid data: " << output_line;
                                 terminated = true;
                                 return CmdControl::Terminate;
@@ -358,14 +381,22 @@ void systemImpl::install_signed_firmware(const types::system::FirmwareUpdateRequ
                             return CmdControl::Continue;
                         });
         if (firmware_status.firmware_update_status == types::system::FirmwareUpdateStatusEnum::Installed) {
-            if (!this->mod->r_store.empty()) {
-                this->mod->r_store.at(0)->call_store(boot_reason_key,
-                                                     boot_reason_to_string(types::system::BootReason::FirmwareUpdate));
-            }
+            if (this->mod->config.ResetAfterUpdate) {
+                firmware_status.firmware_update_status = types::system::FirmwareUpdateStatusEnum::InstallRebooting;
+                this->publish_firmware_update_status(firmware_status);
 
-            auto reset_type = types::system::ResetType::Hard;
-            bool firmware_installation_running_copy = this->firmware_installation_running;
-            this->handle_reset(reset_type, firmware_installation_running_copy);
+                if (!this->mod->r_store.empty()) {
+                    this->mod->r_store.at(0)->call_store(
+                        boot_reason_key, boot_reason_to_string(types::system::BootReason::FirmwareUpdate));
+                }
+
+                auto reset_type = types::system::ResetType::Hard;
+                bool firmware_installation_running_copy = this->firmware_installation_running;
+                this->handle_reset(reset_type, firmware_installation_running_copy);
+            } else {
+                EVLOG_info << "Firmware installed but ResetAfterUpdate is false - skipping reset.";
+                this->firmware_installation_running = false;
+            }
         } else {
             // Installation finished without reaching Installed, so no reset is triggered.
             // Clear the flag so that a subsequent firmware update request is not rejected
@@ -499,10 +530,10 @@ void systemImpl::handle_reset(types::system::ResetType& type, bool& scheduled) {
 
         if (type == types::system::ResetType::Soft) {
             EVLOG_info << "Performing soft reset now.";
-            kill(getpid(), SIGINT);
+            kill(getpid(), SIGTERM);
         } else {
             EVLOG_info << "Performing hard reset now.";
-            kill(getpid(), SIGINT); // FIXME(piet): Define appropriate behavior for hard reset
+            kill(getpid(), SIGTERM); // FIXME(piet): Define appropriate behavior for hard reset
         }
     }).detach();
 }
@@ -524,6 +555,13 @@ types::system::BootReason systemImpl::handle_get_boot_reason() {
     }
     this->mod->r_store.at(0)->call_delete(boot_reason_key);
     return types::system::string_to_boot_reason(final_reason);
+}
+
+types::network::ConfigureNetworkResponse
+systemImpl::handle_configure_network(types::network::ConfigureNetworkRequest& request) {
+    types::network::ConfigureNetworkResponse response;
+    response.status = types::network::ConfigureNetworkStatusEnum::NotSupported;
+    return response;
 }
 
 } // namespace main

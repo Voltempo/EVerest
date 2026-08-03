@@ -493,9 +493,11 @@ public:
     /// initiate a StopTransaction.req for those transactions. If this vector contains session_ids this function will
     /// not stop transactions with this session_id even in case it has an internal database entry for this session and
     /// it hasnt been stopped yet. Its ignored if this vector contains session_ids that are unknown to libocpp.
+    /// \param start_connecting if true (default) the websocket connection is initiated as part of start(). If false
+    /// connecting is deferred until an explicit connect_websocket() call.
     ///  \return
     bool start(const std::map<int, ChargePointStatus>& connector_status_map, BootReasonEnum bootreason,
-               const std::set<std::string>& resuming_session_ids);
+               const std::set<std::string>& resuming_session_ids, bool start_connecting = true);
 
     /// \brief Restarts the ChargePoint if it has been stopped before. The ChargePoint is reinitialized, connects to the
     /// websocket and starts to communicate OCPP messages again
@@ -650,9 +652,11 @@ public:
     /// \param energy_wh_import stop meter value in Wh
     /// \param id_tag_end
     /// \param signed_meter_value e.g. in OCMF format
+    /// \param start_signed_meter_value e.g. in OCMF format
     void on_transaction_stopped(const std::int32_t connector, const std::string& session_id, const Reason& reason,
                                 ocpp::DateTime timestamp, float energy_wh_import,
-                                std::optional<CiString<20>> id_tag_end, std::optional<std::string> signed_meter_value);
+                                std::optional<CiString<20>> id_tag_end, std::optional<std::string> signed_meter_value,
+                                std::optional<std::string> start_signed_meter_value);
 
     /// \brief This function should be called when EV indicates that it suspends charging on the given \p connector
     /// \param connector

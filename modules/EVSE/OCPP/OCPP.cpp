@@ -17,12 +17,16 @@
 #include <everest/conversions/ocpp/ocpp_conversions.hpp>
 #include <fmt/core.h>
 
-#include <conversions.hpp>
-#include <error_mapping.hpp>
 #include <everest/conversions/ocpp/evse_security_ocpp.hpp>
 #include <everest/external_energy_limits/external_energy_limits.hpp>
+#include <everest/ocpp_module_common/v16/error_mapping.hpp>
 
 namespace module {
+
+// The MREC error mapping is shared with other OCPP modules via lib/everest/ocpp_module_common
+using ocpp_module_common::v16::CHARGE_X_MREC_VENDOR_ID;
+using ocpp_module_common::v16::MREC_ERROR_MAP;
+using ocpp_module_common::v16::OCPP_ERROR_MAP;
 
 // helper type for visitor
 template <class... Ts> struct overloaded : Ts... {
@@ -251,8 +255,13 @@ void OCPP::process_session_event(int32_t evse_id, const types::evse_manager::Ses
             // custom data transfer
             signed_meter_data.emplace(signed_meter_value.value().signed_meter_data);
         }
+        std::optional<std::string> start_signed_meter_data;
+        if (transaction_finished.start_signed_meter_value.has_value()) {
+            start_signed_meter_data.emplace(transaction_finished.start_signed_meter_value.value().signed_meter_data);
+        }
         this->charge_point->on_transaction_stopped(ocpp_connector_id, session_event.uuid, reason, timestamp,
-                                                   energy_Wh_import, id_tag_opt, signed_meter_data);
+                                                   energy_Wh_import, id_tag_opt, signed_meter_data,
+                                                   start_signed_meter_data);
         // always triggered by libocpp
     } else if (session_event.event == types::evse_manager::SessionEventEnum::SessionStarted) {
         EVLOG_info << "Connector#" << ocpp_connector_id << ": "
@@ -355,7 +364,7 @@ void OCPP::init_evse_subscriptions() {
             [this, extensions_id](types::iso15118::RequestExiStreamSchema request) {
                 this->charge_point->data_transfer_pnc_get_15118_ev_certificate(
                     extensions_id, request.exi_request, request.iso15118_schema_version,
-                    conversions::to_ocpp_certificate_action_enum(request.certificate_action));
+                    ocpp_module_common::conversions::to_ocpp_certificate_action_enum(request.certificate_action));
             });
         extensions_id++;
     }
@@ -900,8 +909,9 @@ void OCPP::ready() {
         [this](const int32_t connector_id, const ocpp::v2::Get15118EVCertificateResponse& certificate_response,
                const ocpp::v2::CertificateActionEnum& certificate_action) {
             types::iso15118::ResponseExiStreamStatus response;
-            response.status = conversions::to_everest_iso15118_status(certificate_response.status);
-            response.certificate_action = conversions::to_everest_certificate_action_enum(certificate_action);
+            response.status = ocpp_module_common::conversions::to_everest_iso15118_status(certificate_response.status);
+            response.certificate_action =
+                ocpp_module_common::conversions::to_everest_certificate_action_enum(certificate_action);
             if (not certificate_response.exiResponse.get().empty()) {
                 // since exi_response is an optional in the EVerest type we only set
                 // it when not empty

@@ -7,12 +7,12 @@
 
 #include <websocketpp_utils/uri.hpp>
 
-#include <conversions.hpp>
-#include <device_model/composed_device_model_storage.hpp>
-#include <error_handling.hpp>
 #include <everest/conversions/ocpp/evse_security_ocpp.hpp>
 #include <everest/conversions/ocpp/ocpp_conversions.hpp>
 #include <everest/external_energy_limits/external_energy_limits.hpp>
+#include <everest/ocpp_module_common/conversions.hpp>
+#include <everest/ocpp_module_common/device_model/composed_device_model_storage.hpp>
+#include <everest/ocpp_module_common/error_handling.hpp>
 #include <ocpp/v2/utils.hpp>
 
 namespace {
@@ -1012,10 +1012,12 @@ void OCPP201::ready() {
         device_model_database_path, device_model_database_migration_path, device_model_config_path);
 
     // initialize everest device model
+    // no DER components: this module does not implement der_active_directives_callback (DER is OCPPmulti-only)
     this->everest_device_model_storage = std::make_shared<device_model::EverestDeviceModelStorage>(
         r_evse_manager, r_extensions_15118, this->evse_hardware_capabilities_map,
         this->evse_supported_energy_transfer_modes, this->evse_service_renegotiation_supported,
-        everest_device_model_database_path, device_model_database_migration_path, get_config_service_client());
+        /*with_der_components=*/false, everest_device_model_database_path, device_model_database_migration_path,
+        get_config_service_client());
 
     // initialize composed device model, this will be provided to the ChargePoint constructor
     auto composed_device_model_storage = std::make_unique<module::device_model::ComposedDeviceModelStorage>();
@@ -1469,10 +1471,16 @@ void OCPP201::process_tx_event_effect(const int32_t evse_id, const TxEventEffect
         transaction_data->meter_value = conversions::to_ocpp_meter_value(get_meter_value(session_event),
                                                                          ocpp::v2::ReadingContextEnum::Transaction_End,
                                                                          get_signed_meter_value(session_event));
+        std::optional<ocpp::v2::SignedMeterValue> start_signed_meter_value;
+        if (session_event.transaction_finished.has_value() &&
+            session_event.transaction_finished.value().start_signed_meter_value.has_value()) {
+            start_signed_meter_value = conversions::to_ocpp_signed_meter_value(
+                session_event.transaction_finished.value().start_signed_meter_value.value());
+        }
         this->charge_point->on_transaction_finished(evse_id, transaction_data->timestamp, transaction_data->meter_value,
                                                     transaction_data->stop_reason, transaction_data->trigger_reason,
                                                     transaction_data->id_token, std::nullopt,
-                                                    transaction_data->charging_state);
+                                                    transaction_data->charging_state, start_signed_meter_value);
         this->transaction_handler->reset_transaction_data(evse_id);
     }
 }

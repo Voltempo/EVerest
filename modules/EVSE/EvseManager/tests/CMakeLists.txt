@@ -15,6 +15,7 @@ target_include_directories(${TEST_TARGET_NAME} PRIVATE
 )
 
 target_sources(${TEST_TARGET_NAME} PRIVATE
+    EnergyTransferModesTest.cpp
     EventQueueTest.cpp
     ErrorHandlingTest.cpp
     IECStateMachineTest.cpp
@@ -25,6 +26,7 @@ target_sources(${TEST_TARGET_NAME} PRIVATE
     ../IECStateMachine.cpp
     ../SessionLog.cpp
     ../backtrace.cpp
+    ../energy_transfer_modes.cpp
     ../over_voltage/OverVoltageMonitor.cpp
     ../voltage_plausibility/VoltagePlausibilityMonitor.cpp
     ../v2gMessage.cpp
@@ -41,6 +43,7 @@ target_link_libraries(${TEST_TARGET_NAME} PRIVATE
     everest::framework
     everest::helpers
     pugixml::pugixml
+    everest::util
     sigslot
 )
 
@@ -72,6 +75,7 @@ target_link_libraries(${CHARGER_TEST_TARGET_NAME} PRIVATE
     GTest::gtest_main
     everest::framework
     everest::helpers
+    everest::util
     sigslot
 )
 

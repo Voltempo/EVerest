@@ -17,6 +17,7 @@ if(LIBOCPP_ENABLE_V2)
     # Add all v2 tests you don't want to include in the default test executable here.
     list(APPEND SEPARATE_UNIT_TESTS ${CMAKE_CURRENT_SOURCE_DIR}/lib/ocpp/v2/functional_blocks/test_authorization.cpp)
     list(APPEND SEPARATE_UNIT_TESTS ${CMAKE_CURRENT_SOURCE_DIR}/lib/ocpp/v2/functional_blocks/test_availability.cpp)
+    list(APPEND SEPARATE_UNIT_TESTS ${CMAKE_CURRENT_SOURCE_DIR}/lib/ocpp/v2/functional_blocks/test_remote_transaction_control.cpp)
     list(APPEND SEPARATE_UNIT_TESTS ${CMAKE_CURRENT_SOURCE_DIR}/lib/ocpp/v2/functional_blocks/test_security.cpp)
     list(APPEND SEPARATE_UNIT_TESTS ${CMAKE_CURRENT_SOURCE_DIR}/lib/ocpp/v2/functional_blocks/test_tariff_and_cost.cpp)
 endif()
@@ -82,6 +83,7 @@ add_custom_command(TARGET libocpp_unit_tests POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E remove_directory ${DEVICE_MODEL_EXAMPLE_CONFIG_LOCATION_V2}
         COMMAND ${CMAKE_COMMAND} -E copy_directory ${DEVICE_MODEL_CURRENT_EXAMPLE_CONFIG_LOCATION_V2} ${DEVICE_MODEL_EXAMPLE_CONFIG_LOCATION_V2}
         COMMAND ${CMAKE_COMMAND} -E copy ${DEVICE_MODEL_TEST_DER_CONFIG_FILE} ${DEVICE_MODEL_EXAMPLE_CONFIG_LOCATION_V2}/custom/DCDERCtrlr_1.json
+        COMMAND ${CMAKE_COMMAND} -E copy ${DEVICE_MODEL_TEST_AC_DER_CONFIG_FILE} ${DEVICE_MODEL_EXAMPLE_CONFIG_LOCATION_V2}/custom/ACDERCtrlr_1.json
 )
 
 if(EVEREST_ENABLE_COVERAGE)

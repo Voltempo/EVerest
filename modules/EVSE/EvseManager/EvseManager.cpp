@@ -10,6 +10,7 @@
 #include "IECStateMachine.hpp"
 #include "SessionLog.hpp"
 #include "Timeout.hpp"
+#include "energy_transfer_modes.hpp"
 #include "scoped_lock_timeout.hpp"
 #include "utils.hpp"
 
@@ -108,30 +109,6 @@ get_dc_external_derate(std::optional<float> present_voltage,
     }
 
     return d;
-}
-
-std::vector<types::iso15118::EnergyTransferMode>
-get_supported_ac_energy_transfers(const Conf& config, const types::evse_board_support::HardwareCapabilities& caps) {
-    std::vector<types::iso15118::EnergyTransferMode> energy_transfers;
-
-    const auto min_phases = std::clamp(caps.min_phase_count_import, 1, 3);
-    const auto max_phases = std::clamp(caps.max_phase_count_import, min_phases, 3);
-
-    for (const auto& [count, mode] : {
-             std::pair{1, types::iso15118::EnergyTransferMode::AC_single_phase_core},
-             std::pair{2, types::iso15118::EnergyTransferMode::AC_two_phase},
-             std::pair{3, types::iso15118::EnergyTransferMode::AC_three_phase_core},
-         }) {
-        if (count >= min_phases and count <= max_phases) {
-            energy_transfers.push_back(mode);
-        }
-    }
-
-    if (config.supported_iso_ac_bpt and caps.max_current_A_export > 0 and caps.max_phase_count_export >= 1) {
-        energy_transfers.push_back(types::iso15118::EnergyTransferMode::AC_BPT);
-    }
-
-    return energy_transfers;
 }
 
 } // namespace
@@ -305,11 +282,7 @@ void EvseManager::init() {
             EVLOG_debug << fmt::format("Max AC hardware capabilities: {}A/{}ph", c.max_current_A_import,
                                        c.max_phase_count_import);
 
-            const auto energy_transfers = get_supported_ac_energy_transfers(config, c);
-
-            if (update_supported_energy_transfers(energy_transfers)) {
-                this->publish_and_update_supported_energy_transfers();
-            }
+            recompute_and_publish_supported_ac_energy_transfers();
 
             update_hlc_ac_parameters();
         }
@@ -317,7 +290,7 @@ void EvseManager::init() {
 }
 
 void EvseManager::ready() {
-    bsp = std::make_unique<IECStateMachine>(r_bsp, config.lock_connector_in_state_b);
+    bsp = std::make_unique<IECStateMachine>(r_bsp, config.lock_connector_in_state_b, config.unlock_when_deauthorized);
 
     if (config.hack_simplified_mode_limit_10A) {
         bsp->set_ev_simplified_mode_evse_limit(true);
@@ -343,7 +316,12 @@ void EvseManager::ready() {
 
     if (not config.lock_connector_in_state_b) {
         EVLOG_warning << "Unlock connector in CP state B. This violates IEC61851-1:2019 D.6.5 Table D.9 line 4 and "
-                         "should not be used in public environments!";
+                         "should not be used in public environments! This feature is deprecated.";
+    }
+
+    if (config.unlock_when_deauthorized) {
+        EVLOG_warning << "The config `unlock_when_deauthorized` is set to true. This violates "
+                         "IEC61851-1:2019 D.6.5 Table D.9 line 4 and should not be used in public environments!";
     }
 
     const auto hw_caps = *hw_capabilities.handle();
@@ -471,7 +449,7 @@ void EvseManager::ready() {
             r_hlc[0]->call_set_charging_parameters(setup_physical_values);
 
             const auto hw_caps = *hw_capabilities.handle();
-            initial_energy_transfers = get_supported_ac_energy_transfers(config, hw_caps);
+            initial_energy_transfers = get_supported_ac_energy_transfers(hw_caps, config.supported_iso_ac_bpt, false);
 
             r_hlc[0]->subscribe_ac_eamount([this](double e) {
                 // FIXME send only on change / throttle messages
@@ -631,6 +609,9 @@ void EvseManager::ready() {
                 r_over_voltage_monitor[0]->subscribe_voltage_measurement_V([this](float voltage_V) {
                     if (internal_over_voltage_monitor) {
                         internal_over_voltage_monitor->update_voltage(voltage_V);
+                    }
+                    if (voltage_plausibility_monitor) {
+                        voltage_plausibility_monitor->update_over_voltage_monitor_voltage(voltage_V);
                     }
                 });
             }
@@ -881,12 +862,6 @@ void EvseManager::ready() {
                 if (not r_over_voltage_monitor.empty()) {
                     r_over_voltage_monitor[0]->call_set_limits(get_emergency_over_voltage_threshold(),
                                                                get_error_over_voltage_threshold());
-                    // Subscribe to voltage measurements from over_voltage_monitor for plausibility check
-                    r_over_voltage_monitor[0]->subscribe_voltage_measurement_V([this](float voltage_V) {
-                        if (voltage_plausibility_monitor) {
-                            voltage_plausibility_monitor->update_over_voltage_monitor_voltage(voltage_V);
-                        }
-                    });
                 }
                 if (internal_over_voltage_monitor) {
                     internal_over_voltage_monitor->set_limits(get_emergency_over_voltage_threshold(),
@@ -1834,6 +1809,15 @@ bool EvseManager::update_supported_energy_transfers(const types::iso15118::Energ
     return update_supported_energy_transfers(std::vector<types::iso15118::EnergyTransferMode>{energy_transfer});
 }
 
+void EvseManager::recompute_and_publish_supported_ac_energy_transfers() {
+    const auto caps = *hw_capabilities.handle();
+    const auto der = der_available.load();
+    const auto energy_transfers = get_supported_ac_energy_transfers(caps, config.supported_iso_ac_bpt, der);
+    if (update_supported_energy_transfers(energy_transfers)) {
+        publish_and_update_supported_energy_transfers();
+    }
+}
+
 void EvseManager::update_hlc_ac_parameters() {
     // Copy hw_caps before acquiring hlc_ac_parameters_mutex to avoid holding two locks simultaneously
     const auto hw_caps = *hw_capabilities.handle();
@@ -1880,8 +1864,10 @@ void EvseManager::update_hlc_ac_parameters() {
     if (hw_caps.max_phase_count_import == 3) {
         ac_connectors.push_back(types::iso15118::Connector::ThreePhase);
     }
-    r_hlc[0]->call_update_ac_parameters({50, static_cast<float>(config.ac_nominal_voltage), ac_connectors, std::nullopt,
-                                         std::nullopt}); // TODO(sl): Getting nominal frequency
+    r_hlc[0]->call_update_ac_parameters(
+        {50, static_cast<float>(config.ac_nominal_voltage), ac_connectors, std::nullopt, std::nullopt,
+         config.ac_max_reactive_power > 0 ? std::make_optional(static_cast<float>(config.ac_max_reactive_power))
+                                          : std::nullopt}); // TODO(sl): Getting nominal frequency
 }
 
 void EvseManager::log_v2g_message(types::iso15118::V2gMessages const& v2g_messages) {
@@ -2015,7 +2001,12 @@ bool EvseManager::check_voltage_to_protective_earth_in_range(types::isolation_mo
 }
 
 bool EvseManager::check_isolation_resistance_in_range(double resistance) {
-    if (resistance < CABLECHECK_INSULATION_FAULT_RESISTANCE_OHM) {
+    const double insulation_fault_resistance_ohm =
+        (connector_type.has_value() and connector_type.value() == types::evse_manager::ConnectorTypeEnum::cMCS)
+            ? CABLECHECK_MCS_INSULATION_FAULT_RESISTANCE_OHM
+            : CABLECHECK_INSULATION_FAULT_RESISTANCE_OHM;
+
+    if (resistance < insulation_fault_resistance_ohm) {
         session_log.evse(false, fmt::format("Isolation measurement FAULT R_F {}.", resistance));
         r_hlc[0]->call_update_isolation_status(types::iso15118::IsolationStatus::Fault);
         return false;

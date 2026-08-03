@@ -21,7 +21,6 @@ target_sources(iso15118
 
         session/feedback.cpp
         session/iso.cpp
-        session/logger.cpp
 
         d20/context.cpp
         d20/context_helper.cpp
@@ -38,6 +37,7 @@ target_sources(iso15118
         d20/state/service_detail.cpp
         d20/state/service_selection.cpp
         d20/state/ac_charge_parameter_discovery.cpp
+        d20/state/ac_der_iec_charge_parameter_discovery.cpp
         d20/state/dc_charge_parameter_discovery.cpp
         d20/state/schedule_exchange.cpp
         d20/state/dc_cable_check.cpp
@@ -46,6 +46,7 @@ target_sources(iso15118
         d20/state/dc_charge_loop.cpp        
         d20/state/dc_welding_detection.cpp
         d20/state/ac_charge_loop.cpp
+        d20/state/ac_der_iec_charge_loop.cpp
         d20/state/session_stop.cpp
         
         message/variant.cpp
@@ -90,11 +91,11 @@ target_link_libraries(iso15118
     PRIVATE
         OpenSSL::SSL
         OpenSSL::Crypto
+        everest::tls
 )
 target_sources(iso15118
     PRIVATE
     io/connection_ssl.cpp
-    misc/helper_ssl.cpp
 )
 
 # FIXME (aw): do we want to have this public here?

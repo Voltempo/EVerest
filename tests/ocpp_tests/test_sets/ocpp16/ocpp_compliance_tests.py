@@ -11,6 +11,8 @@ import pytest
 from everest.testing.core_utils.controller.test_controller_interface import (
     TestController,
 )
+from everest.testing.core_utils._configuration.everest_configuration_strategies.disable_reset_after_update_strategy import \
+    DisableResetAfterUpdateStrategy
 
 # fmt: off
 
@@ -4302,6 +4304,15 @@ async def test_firmware_update_download_install(
     assert await wait_for_and_validate(
         test_utility,
         charge_point_v16,
+        "StatusNotification",
+        call.StatusNotification(
+            1, ChargePointErrorCode.no_error, ChargePointStatus.unavailable
+        ),
+    )
+
+    assert await wait_for_and_validate(
+        test_utility,
+        charge_point_v16,
         "FirmwareStatusNotification",
         call.DiagnosticsStatusNotification(FirmwareStatus.installing),
     )
@@ -4311,6 +4322,67 @@ async def test_firmware_update_download_install(
         charge_point_v16,
         "FirmwareStatusNotification",
         call.DiagnosticsStatusNotification(FirmwareStatus.installed),
+    )
+
+    assert await wait_for_and_validate(
+        test_utility,
+        charge_point_v16,
+        "StatusNotification",
+        call.StatusNotification(
+            1, ChargePointErrorCode.no_error, ChargePointStatus.available
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.xdist_group(name="FTP")
+async def test_firmware_update_download_install_keep_connectors_available(
+    charge_point_v16: ChargePoint16, test_utility: TestUtility, ftp_server, test_config
+):
+    logging.info(
+        "######### test_firmware_update_download_install_keep_connectors_available #########"
+    )
+
+    retrieve_date = datetime.now(timezone.utc)
+    location = f"ftp://{getpass.getuser()}:12345@localhost:{ftp_server.port}/firmware_update.pnx#disable_connectors_during_install=false"
+
+    await charge_point_v16.update_firmware_req(
+        location=location, retrieve_date=retrieve_date.isoformat()
+    )
+
+    assert await wait_for_and_validate(
+        test_utility,
+        charge_point_v16,
+        "FirmwareStatusNotification",
+        call.FirmwareStatusNotification(FirmwareStatus.downloading),
+    )
+
+    # Verify that the connectors are not made unavailable.
+    # Drop the message buffer so that no StatusNotification sent before this point causes a test failure.
+    test_utility.messages.clear()
+    test_utility.forbidden_actions.append("StatusNotification")
+
+    assert await wait_for_and_validate(
+        test_utility,
+        charge_point_v16,
+        "FirmwareStatusNotification",
+        call.FirmwareStatusNotification(FirmwareStatus.downloaded),
+    )
+
+    assert await wait_for_and_validate(
+        test_utility,
+        charge_point_v16,
+        "FirmwareStatusNotification",
+        call.FirmwareStatusNotification(FirmwareStatus.installing),
+    )
+
+    test_utility.forbidden_actions.remove("StatusNotification")
+
+    assert await wait_for_and_validate(
+        test_utility,
+        charge_point_v16,
+        "FirmwareStatusNotification",
+        call.FirmwareStatusNotification(FirmwareStatus.installed),
     )
 
 
@@ -6903,8 +6975,16 @@ async def test_signed_update_firmware(
         call.SignedFirmwareStatusNotification(FirmwareStatus.installed, 1),
     )
 
+    assert await wait_for_and_validate(
+        test_utility,
+        charge_point_v16,
+        "SignedFirmwareStatusNotification",
+        call.SignedFirmwareStatusNotification(FirmwareStatus.install_rebooting, 1),
+    )
+
 @pytest.mark.asyncio
 @pytest.mark.xdist_group(name="FTP")
+@pytest.mark.everest_config_adaptions(DisableResetAfterUpdateStrategy())
 async def test_signed_update_firmware_keep_connectors_available(
     test_config: OcppTestConfiguration,
     charge_point_v16: ChargePoint16,

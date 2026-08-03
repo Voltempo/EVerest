@@ -1,3 +1,4 @@
+ev_add_module(AcTemperatureDerating)
 ev_add_module(EnergyManager)
 ev_add_module(EnergyNode)
 
@@ -9,7 +10,7 @@ if (NOT EEBUS_BUILD_MODE MATCHES "^(AUTO|ON|OFF)$")
 endif()
 
 if (NOT EEBUS_BUILD_MODE STREQUAL "OFF")
-    include(${CMAKE_SOURCE_DIR}/cmake/eebus-dependency-check.cmake)
+    include(${PROJECT_SOURCE_DIR}/cmake/eebus-dependency-check.cmake)
     eebus_check_dependencies(
         RESULT_VAR EEBUS_DEPENDENCIES_AVAILABLE
         REASON_VAR EEBUS_MISSING_DEPENDENCIES

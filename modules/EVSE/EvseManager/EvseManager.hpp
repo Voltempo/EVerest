@@ -63,6 +63,7 @@ struct Conf {
     bool payment_enable_eim;
     bool payment_enable_contract;
     double ac_nominal_voltage;
+    double ac_max_reactive_power;
     bool ev_receipt_required;
     bool session_logging;
     std::string session_logging_path;
@@ -107,6 +108,7 @@ struct Conf {
     std::string switch_3ph1ph_cp_state;
     int soft_over_current_timeout_ms;
     bool lock_connector_in_state_b;
+    bool unlock_when_deauthorized;
     int state_F_after_fault_ms;
     bool fail_on_powermeter_errors;
     bool raise_mrec9;
@@ -291,6 +293,12 @@ public:
         // limits are not yet included in request.
     }
     std::atomic_int ac_nr_phases_active{0};
+
+    std::atomic<bool> der_available{false};
+    void recompute_and_publish_supported_ac_energy_transfers();
+    bool is_hlc_enabled() const {
+        return hlc_enabled;
+    }
     // ev@1fce4c5e-0ab8-41bb-90f7-14277703d2ac:v1
 
 protected:
@@ -408,6 +416,7 @@ private:
 
     static constexpr double CABLECHECK_CURRENT_LIMIT{2};
     static constexpr double CABLECHECK_INSULATION_FAULT_RESISTANCE_OHM{100000.};
+    static constexpr double CABLECHECK_MCS_INSULATION_FAULT_RESISTANCE_OHM{125000.};
     static constexpr double CABLECHECK_SAFE_VOLTAGE{60.};
     static constexpr int CABLECHECK_SELFTEST_TIMEOUT{30};
 

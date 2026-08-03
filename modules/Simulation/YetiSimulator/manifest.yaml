@@ -7,6 +7,10 @@ config:
     description: Reset absolute powermeter readings to zero when CP changes from state A to B
     type: boolean
     default: true
+  dummy_meter_value_send_on_transaction_start:
+    description: Send dummy meter start value blob on transaction start
+    type: boolean
+    default: true
   dummy_meter_value_blob_start:
     description: Dummy meter value blob sent on transaction start to be used for testing
     type: string
@@ -15,10 +19,18 @@ config:
     description: Dummy meter value blob sent on transaction stop to be used for testing
     type: string
     default: "test stop value"
+  ac_nominal_voltage:
+    description: Nominal AC voltage between phase and neutral in Volt, reported per phase by the simulated power meter
+    type: number
+    default: 230.0
+    minimum: 99.0
 provides:
   powermeter:
     interface: powermeter
     description: provides the Yeti Internal Power Meter
+  temperature_sensor:
+    interface: temperature_sensor
+    description: Simulated internal temperature derived from powermeter load
   board_support:
     interface: evse_board_support
     description: provides the EVSE board support Interface to low level control pilot, relais, rcd, motor lock

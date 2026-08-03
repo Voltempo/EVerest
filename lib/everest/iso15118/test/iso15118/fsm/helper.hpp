@@ -35,24 +35,27 @@ inline d20::EvseSetupConfig create_default_evse_setup() {
     const std::vector<d20::ControlMobilityNeedsModes> control_mobility_modes = {
         {dt::ControlMode::Scheduled, dt::MobilityNeedsMode::ProvidedByEvcc}};
 
-    return d20::EvseSetupConfig{
-        evse_id,   supported_energy_services, auth_services, vas_services, cert_install, dc_limits,
-        ac_limits, control_mobility_modes,    std::nullopt,  std::nullopt, std::nullopt, powersupply_limits};
+    return d20::EvseSetupConfig{evse_id,
+                                supported_energy_services,
+                                auth_services,
+                                vas_services,
+                                cert_install,
+                                dc_limits,
+                                ac_limits,
+                                std::nullopt,
+                                control_mobility_modes,
+                                std::nullopt,
+                                std::nullopt,
+                                std::nullopt,
+                                std::nullopt,
+                                powersupply_limits};
 }
 
 class FsmStateHelper {
 public:
     FsmStateHelper(const d20::SessionConfig& config, std::optional<d20::PauseContext>& pause_ctx_,
                    const session::feedback::Callbacks& callbacks) :
-        log(this), ctx(callbacks, log, config, pause_ctx_, active_control_event, msg_exch, timeouts) {
-
-        session::logging::set_session_log_callback([](std::size_t, const session::logging::Event& event) {
-            if (const auto* simple_event = std::get_if<session::logging::SimpleEvent>(&event)) {
-                printf("log(session: simple event): %s\n", simple_event->info.c_str());
-            } else {
-                printf("log(session): not decoded\n");
-            }
-        });
+        ctx(callbacks, config, pause_ctx_, active_control_event, msg_exch, timeouts) {
 
         io::set_logging_callback([](LogLevel level, std::string message) {
             printf("log(%d): %s\n", static_cast<int>(level), message.c_str());
@@ -75,8 +78,6 @@ private:
 
     d20::MessageExchange msg_exch{output_stream_view};
     std::optional<d20::ControlEvent> active_control_event;
-
-    session::SessionLogger log;
 
     d20::Timeouts timeouts;
 

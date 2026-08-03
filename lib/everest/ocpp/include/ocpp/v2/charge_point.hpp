@@ -7,6 +7,8 @@
 #include <memory>
 #include <set>
 
+#include <everest/util/async/monitor.hpp>
+
 #include <ocpp/common/message_dispatcher.hpp>
 
 #include <ocpp/common/charging_station_base.hpp>
@@ -25,6 +27,8 @@
 #include <ocpp/v2/messages/Get15118EVCertificate.hpp>
 #include <ocpp/v2/messages/GetCompositeSchedule.hpp>
 #include <ocpp/v2/messages/NotifyEVChargingNeeds.hpp>
+
+#include <ocpp/v21/messages/NotifyDERAlarm.hpp>
 
 #include "component_state_manager.hpp"
 
@@ -137,6 +141,14 @@ public:
                                                         const FirmwareStatusEnum& firmware_update_status,
                                                         const bool disable_connectors_during_install = true) = 0;
 
+    /// \brief Sends a NotifyDERAlarm to the CSMS for a DER grid event. No-op if no EVSE declares DER support.
+    virtual void on_der_alarm(const ocpp::v21::NotifyDERAlarmRequest& request) = 0;
+
+    /// \brief Re-emit the current active DER directive set through the der_active_directives_callback. Lets a
+    /// provider learn the standing set when a newly-enabled EVSE joins an already-built DER block (whose
+    /// construction-time emit already fired). No-op if the DER functional block is not available.
+    virtual void on_der_republish_active_directives() = 0;
+
     /// \brief Event handler that should be called when a session has started
     /// \param evse_id
     /// \param connector_id
@@ -175,12 +187,13 @@ public:
     /// \param reason
     /// \param id_token
     /// \param signed_meter_value
+    /// \param start_signed_meter_value
     /// \param charging_state
-    virtual void on_transaction_finished(const std::int32_t evse_id, const DateTime& timestamp,
-                                         const MeterValue& meter_stop, const ReasonEnum reason,
-                                         const TriggerReasonEnum trigger_reason, const std::optional<IdToken>& id_token,
-                                         const std::optional<std::string>& signed_meter_value,
-                                         const ChargingStateEnum charging_state) = 0;
+    virtual void on_transaction_finished(
+        const std::int32_t evse_id, const DateTime& timestamp, const MeterValue& meter_stop, const ReasonEnum reason,
+        const TriggerReasonEnum trigger_reason, const std::optional<IdToken>& id_token,
+        const std::optional<std::string>& signed_meter_value, const ChargingStateEnum charging_state,
+        const std::optional<SignedMeterValue>& start_signed_meter_value = std::nullopt) = 0;
 
     /// \brief Event handler that should be called when a session has finished
     /// \param evse_id
@@ -411,7 +424,7 @@ private:
     std::unique_ptr<ProvisioningInterface> provisioning;
     std::unique_ptr<RemoteTransactionControlInterface> remote_transaction_control;
     std::unique_ptr<BidirectionalInterface> bidirectional;
-    std::unique_ptr<v21::DERControlInterface> der_control;
+    everest::lib::util::monitor<std::unique_ptr<v21::DERControlInterface>> der_control;
 
     // utility
     std::shared_ptr<MessageQueue<v2::MessageType>> message_queue;
@@ -460,6 +473,10 @@ private:
     OcspUpdater make_ocsp_updater();
     void update_dm_availability_state(const std::int32_t evse_id, const std::int32_t connector_id,
                                       const ConnectorStatusEnum status);
+
+    /// \brief Builds the DER functional block if not yet built and any DER component reports Available==true.
+    /// Idempotent. Invoked at construction and from the variable listener when Available flips false->true.
+    void build_der_control_if_enabled();
 
     void message_callback(const std::string& message);
 
@@ -598,6 +615,10 @@ public:
                                                 const FirmwareStatusEnum& firmware_update_status,
                                                 bool disable_connectors_during_install = true) override;
 
+    void on_der_alarm(const ocpp::v21::NotifyDERAlarmRequest& request) override;
+
+    void on_der_republish_active_directives() override;
+
     void on_session_started(const std::int32_t evse_id, const std::int32_t connector_id) override;
 
     Get15118EVCertificateResponse
@@ -611,11 +632,11 @@ public:
                                 const std::optional<std::int32_t>& remote_start_id,
                                 const ChargingStateEnum charging_state) override;
 
-    void on_transaction_finished(const std::int32_t evse_id, const DateTime& timestamp, const MeterValue& meter_stop,
-                                 const ReasonEnum reason, const TriggerReasonEnum trigger_reason,
-                                 const std::optional<IdToken>& id_token,
-                                 const std::optional<std::string>& signed_meter_value,
-                                 const ChargingStateEnum charging_state) override;
+    void on_transaction_finished(
+        const std::int32_t evse_id, const DateTime& timestamp, const MeterValue& meter_stop, const ReasonEnum reason,
+        const TriggerReasonEnum trigger_reason, const std::optional<IdToken>& id_token,
+        const std::optional<std::string>& signed_meter_value, const ChargingStateEnum charging_state,
+        const std::optional<SignedMeterValue>& start_signed_meter_value = std::nullopt) override;
 
     void on_session_finished(const std::int32_t evse_id, const std::int32_t connector_id) override;
 

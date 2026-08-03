@@ -108,7 +108,7 @@ message_20::ScheduleExchangeResponse handle_request(const message_20::ScheduleEx
 }
 
 void ScheduleExchange::enter() {
-    m_ctx.log.enter_state("ScheduleExchange");
+    logf_debug("Enter state: ScheduleExchange");
 }
 
 Result ScheduleExchange::feed(Event ev) {
@@ -160,11 +160,13 @@ Result ScheduleExchange::feed(Event ev) {
         }
 
         session::feedback::EvseTransferLimits evse_limits;
-        if (m_ctx.session.is_ac_charger()) {
+        if (m_ctx.session.is_ac_charger() or m_ctx.session.is_ac_der_iec_charger()) {
             evse_limits = m_ctx.session_config.ac_limits;
         } else if (m_ctx.session.is_dc_charger()) {
             evse_limits = m_ctx.session_config.dc_limits;
         }
+
+        // TODO(SL): Checking if der_limits should also be published
 
         const session::feedback::EvTransferLimits& ev_limits = m_ctx.session_ev_info.ev_transfer_limits;
 
@@ -192,15 +194,15 @@ Result ScheduleExchange::feed(Event ev) {
 
         m_ctx.stop_timeout(d20::TimeoutType::ONGOING);
 
-        if (m_ctx.session.is_ac_charger()) {
+        if (m_ctx.session.is_ac_charger() or m_ctx.session.is_ac_der_iec_charger()) {
             // For AC move directly to power delivery
             return m_ctx.create_state<PowerDelivery>();
         }
         if (m_ctx.session.is_dc_charger()) {
             return m_ctx.create_state<DC_CableCheck>();
         }
-        m_ctx.log("expected selected_energy_service AC, AC_BPT, DC, DC_BPT! But code type id: %d",
-                  static_cast<int>(selected_energy_service));
+        logf_warning("Expected selected_energy_service AC, AC_BPT, DC, DC_BPT! But code type id: %d",
+                     static_cast<int>(selected_energy_service));
 
         m_ctx.session_stopped = true;
         return {};
@@ -213,7 +215,7 @@ Result ScheduleExchange::feed(Event ev) {
 
         return {};
     } else {
-        m_ctx.log("expected ScheduleExchangeReq! But code type id: %d", variant->get_type());
+        logf_warning("Expected ScheduleExchangeReq! But code type id: %d", variant->get_type());
 
         // Sequence Error
         const message_20::Type req_type = variant->get_type();

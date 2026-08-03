@@ -39,6 +39,7 @@ set(EVEREST_LIB_SUBDIRS
     log
     ocpp
     phase_rotation
+    ocpp_module_common
     run_application
     slac
     sqlite
@@ -58,19 +59,20 @@ set(EVEREST_LIB_SUBDIRS
 set(EVEREST_LIB_DEPS_yaml "log")
 set(EVEREST_LIB_DEPS_io "util")
 set(EVEREST_LIB_DEPS_run_application "log")
-set(EVEREST_LIB_DEPS_evse_security "cbv2g")
+set(EVEREST_LIB_DEPS_evse_security "log;timer")
 # Tier 2
-set(EVEREST_LIB_DEPS_ocpp "log;timer;evse_security;sqlite")
-set(EVEREST_LIB_DEPS_iso15118 "cbv2g")
-set(EVEREST_LIB_DEPS_ieee2030_1_1 "framework")
+set(EVEREST_LIB_DEPS_ocpp "log;timer;evse_security;sqlite;util")
+set(EVEREST_LIB_DEPS_iso15118 "cbv2g;util;tls")
+set(EVEREST_LIB_DEPS_ieee2030_1_1 "util")
+set(EVEREST_LIB_DEPS_tls "util;evse_security")
+set(EVEREST_LIB_DEPS_slac "tls;fsm")
 # Tier 3 (framework-coupled)
-set(EVEREST_LIB_DEPS_tls "util;evse_security;framework")
 set(EVEREST_LIB_DEPS_helpers "tls;framework")
 set(EVEREST_LIB_DEPS_external_energy_limits "framework")
 set(EVEREST_LIB_DEPS_phase_rotation "framework")
 set(EVEREST_LIB_DEPS_everest_api_types "")
 set(EVEREST_LIB_DEPS_conversions "framework;evse_security")
-set(EVEREST_LIB_DEPS_slac "tls")
+set(EVEREST_LIB_DEPS_ocpp_module_common "ocpp;conversions;framework")
 
 # --- Transitive dependency resolver ---
 # Given a list of library names, computes the full transitive closure

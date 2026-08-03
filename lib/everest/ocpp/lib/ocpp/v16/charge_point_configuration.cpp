@@ -999,6 +999,27 @@ std::optional<KeyValue> ChargePointConfiguration::getQueueAllMessagesKeyValue() 
     return queue_all_messages_kv;
 }
 
+std::optional<bool> ChargePointConfiguration::getReportClearedErrors() {
+    std::optional<bool> report_cleared_errors = std::nullopt;
+    if (this->config["Internal"].contains("ReportClearedErrors")) {
+        report_cleared_errors.emplace(this->config["Internal"]["ReportClearedErrors"]);
+    }
+    return report_cleared_errors;
+}
+
+std::optional<KeyValue> ChargePointConfiguration::getReportClearedErrorsKeyValue() {
+    std::optional<KeyValue> report_cleared_errors_kv = std::nullopt;
+    auto report_cleared_errors = this->getReportClearedErrors();
+    if (report_cleared_errors.has_value()) {
+        KeyValue kv;
+        kv.key = "ReportClearedErrors";
+        kv.readonly = true;
+        kv.value.emplace(ocpp::conversions::bool_to_string(report_cleared_errors.value()));
+        report_cleared_errors_kv.emplace(kv);
+    }
+    return report_cleared_errors_kv;
+}
+
 std::optional<std::string> ChargePointConfiguration::getMessageTypesDiscardForQueueing() {
     if (this->config["Internal"].contains("MessageTypesDiscardForQueueing")) {
         return this->config["Internal"]["MessageTypesDiscardForQueueing"];
@@ -2383,6 +2404,62 @@ std::optional<KeyValue> ChargePointConfiguration::getAllowChargingProfileWithout
     return allow_opt;
 }
 
+std::optional<bool> ChargePointConfiguration::getRejectRemoteStartTransactionWithoutConnectorId() {
+    std::optional<bool> reject = std::nullopt;
+    if (this->config["Internal"].contains("RejectRemoteStartTransactionWithoutConnectorId")) {
+        reject.emplace(this->config["Internal"]["RejectRemoteStartTransactionWithoutConnectorId"]);
+    }
+    return reject;
+}
+
+void ChargePointConfiguration::setRejectRemoteStartTransactionWithoutConnectorId(bool reject) {
+    if (this->getRejectRemoteStartTransactionWithoutConnectorId() != std::nullopt) {
+        this->config["Internal"]["RejectRemoteStartTransactionWithoutConnectorId"] = reject;
+        this->setInUserConfig("Internal", "RejectRemoteStartTransactionWithoutConnectorId", reject);
+    }
+}
+
+std::optional<KeyValue> ChargePointConfiguration::getRejectRemoteStartTransactionWithoutConnectorIdKeyValue() {
+    std::optional<KeyValue> reject_opt = std::nullopt;
+    auto reject = this->getRejectRemoteStartTransactionWithoutConnectorId();
+    if (reject != std::nullopt) {
+        KeyValue kv;
+        kv.key = "RejectRemoteStartTransactionWithoutConnectorId";
+        kv.readonly = false;
+        kv.value.emplace(ocpp::conversions::bool_to_string(reject.value()));
+        reject_opt.emplace(kv);
+    }
+    return reject_opt;
+}
+
+std::optional<bool> ChargePointConfiguration::getRemoteStartTransactionWithoutConnectorIdFindFirst() {
+    std::optional<bool> find_first = std::nullopt;
+    if (this->config["Internal"].contains("RemoteStartTransactionWithoutConnectorIdFindFirst")) {
+        find_first.emplace(this->config["Internal"]["RemoteStartTransactionWithoutConnectorIdFindFirst"]);
+    }
+    return find_first;
+}
+
+void ChargePointConfiguration::setRemoteStartTransactionWithoutConnectorIdFindFirst(bool find_first) {
+    if (this->getRemoteStartTransactionWithoutConnectorIdFindFirst() != std::nullopt) {
+        this->config["Internal"]["RemoteStartTransactionWithoutConnectorIdFindFirst"] = find_first;
+        this->setInUserConfig("Internal", "RemoteStartTransactionWithoutConnectorIdFindFirst", find_first);
+    }
+}
+
+std::optional<KeyValue> ChargePointConfiguration::getRemoteStartTransactionWithoutConnectorIdFindFirstKeyValue() {
+    std::optional<KeyValue> find_first_opt = std::nullopt;
+    auto find_first = this->getRemoteStartTransactionWithoutConnectorIdFindFirst();
+    if (find_first != std::nullopt) {
+        KeyValue kv;
+        kv.key = "RemoteStartTransactionWithoutConnectorIdFindFirst";
+        kv.readonly = false;
+        kv.value.emplace(ocpp::conversions::bool_to_string(find_first.value()));
+        find_first_opt.emplace(kv);
+    }
+    return find_first_opt;
+}
+
 std::int32_t ChargePointConfiguration::getWaitForStopTransactionsOnResetTimeout() {
     return this->config["Internal"]["WaitForStopTransactionsOnResetTimeout"];
 }
@@ -3278,6 +3355,12 @@ std::optional<KeyValue> ChargePointConfiguration::get(const CiString<50>& key) {
     if (key == "AllowChargingProfileWithoutStartSchedule") {
         return this->getAllowChargingProfileWithoutStartScheduleKeyValue();
     }
+    if (key == "RejectRemoteStartTransactionWithoutConnectorId") {
+        return this->getRejectRemoteStartTransactionWithoutConnectorIdKeyValue();
+    }
+    if (key == "RemoteStartTransactionWithoutConnectorIdFindFirst") {
+        return this->getRemoteStartTransactionWithoutConnectorIdFindFirstKeyValue();
+    }
     if (key == "WaitForStopTransactionsOnResetTimeout") {
         return this->getWaitForStopTransactionsOnResetTimeoutKeyValue();
     }
@@ -3292,6 +3375,9 @@ std::optional<KeyValue> ChargePointConfiguration::get(const CiString<50>& key) {
     }
     if (key == "QueueAllMessages") {
         return this->getQueueAllMessagesKeyValue();
+    }
+    if (key == "ReportClearedErrors") {
+        return this->getReportClearedErrorsKeyValue();
     }
     if (key == "MessageTypesDiscardForQueueing") {
         return this->getMessageTypesDiscardForQueueingKeyValue();
@@ -4108,6 +4194,24 @@ std::optional<ConfigurationStatus> ChargePointConfiguration::set(const CiString<
         }
         if (isBool(value.get())) {
             this->setAllowChargingProfileWithoutStartSchedule(ocpp::conversions::string_to_bool(value.get()));
+        } else {
+            return ConfigurationStatus::Rejected;
+        }
+    } else if (key == "RejectRemoteStartTransactionWithoutConnectorId") {
+        if (!this->getRejectRemoteStartTransactionWithoutConnectorId().has_value()) {
+            return ConfigurationStatus::NotSupported;
+        }
+        if (isBool(value.get())) {
+            this->setRejectRemoteStartTransactionWithoutConnectorId(ocpp::conversions::string_to_bool(value.get()));
+        } else {
+            return ConfigurationStatus::Rejected;
+        }
+    } else if (key == "RemoteStartTransactionWithoutConnectorIdFindFirst") {
+        if (!this->getRemoteStartTransactionWithoutConnectorIdFindFirst().has_value()) {
+            return ConfigurationStatus::NotSupported;
+        }
+        if (isBool(value.get())) {
+            this->setRemoteStartTransactionWithoutConnectorIdFindFirst(ocpp::conversions::string_to_bool(value.get()));
         } else {
             return ConfigurationStatus::Rejected;
         }
