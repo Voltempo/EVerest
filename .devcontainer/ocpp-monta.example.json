@@ -12,9 +12,11 @@
     "NumberOfConnectors is 2 because one vSECC serves two connectors. Connector ids restart at 1 on",
     "each board, so all three boards report connectors 1 and 2 - EVerest forces that.",
     "",
-    "CompositeScheduleDefaultLimitWatts is what the CSMS assumes when no profile is active. Monta's",
-    "default is 240 kW, which is BELOW this rig's 375 kW connector rating - so a charging profile is",
-    "only observable if it asks for less than 240 kW."
+    "CompositeScheduleDefaultLimitWatts is what the CSMS assumes when no profile is active. It is set",
+    "to 375 kW to match what a Voltempo connector can actually deliver. Monta's own default is 240 kW,",
+    "which would silently cap every session a third below the cable rating and make the charger's 80 kW",
+    "power-sharing steps invisible above five vehicles. A charging profile is only observable if it",
+    "asks for less than this figure."
   ],
 
   "Internal": {
@@ -27,8 +29,8 @@
     "AllowChargingProfileWithoutStartSchedule": true,
     "UseTPM": false,
     "LogMessagesFormat": ["html", "security"],
-    "CompositeScheduleDefaultLimitWatts": 240000,
-    "CompositeScheduleDefaultLimitAmps": 400
+    "CompositeScheduleDefaultLimitWatts": 375000,
+    "CompositeScheduleDefaultLimitAmps": 500
   },
 
   "Core": {

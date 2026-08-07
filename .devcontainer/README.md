@@ -189,9 +189,12 @@ tracked.
 
 Two things that catch people out:
 
-- **`CompositeScheduleDefaultLimitWatts` is 240 kW** - what the CSMS assumes when no profile is
-  active, and *below* this rig's 375 kW connector rating. A charging profile is only observable if it
-  asks for less than 240 kW.
+- **`CompositeScheduleDefaultLimitWatts` must be 375 kW, not Monta's 240 kW default.** It is what the
+  CSMS assumes when no charging profile is active, so at 240 kW every session is silently capped a
+  third below the cable rating. Worse, it hides the charger's behaviour: the 80 kW sharing steps give
+  a connector 375, 320 or 240 kW at one to four vehicles, all of which a 240 kW cap flattens to the
+  same number - the station only looks like it is sharing power once five vehicles are plugged in.
+  The template sets 375 kW. A charging profile is only observable if it asks for less.
 - **One OCPP connection per identity.** Start a second manager holding the same charge point and the
   CSMS displaces the first, which shows up as `Client closed, was not requested internally` in the
   log of the one that lost.
