@@ -5,8 +5,15 @@ import sys
 from pathlib import Path
 import threading
 import math
+from time import monotonic
 
 from everest.framework import Module, RuntimeSession, log
+
+# Backoff for restarting the EVCC after a terminal failure: quick for the ordinary case, capped so a
+# misconfigured module cannot spin.
+HLC_RESTART_MIN_DELAY_S = 1
+HLC_RESTART_MAX_DELAY_S = 30
+HLC_HEALTHY_RUN_S = 60
 
 # fmt: off
 JOSEV_WORK_DIR = Path(__file__).parent / '../../3rd_party/josev'
@@ -26,7 +33,10 @@ from utilities import (
     setup_everest_logging,
     determine_network_interface,
     normalize_evcc_id,
-    patch_josev_config
+    patch_josev_config,
+    patch_josev_authorisation_timeout,
+    patch_josev_sdp_budget_recovery,
+    HlcGaveUp
 )
 
 setup_everest_logging()
@@ -72,13 +82,26 @@ async def evcc_handler_main_loop(module_config: dict, exi_codec: ExificientEXICo
 
     evcc_config = EVCCConfig()
     patch_josev_config(evcc_config, module_config)
+    patch_josev_authorisation_timeout(module_config['authorisation_timeout_s'])
 
-    await EVCCHandler(
+    if module_config['auto_restart_hlc']:
+        patch_josev_sdp_budget_recovery()
+
+    handler = EVCCHandler(
         evcc_config=evcc_config,
         iface=iface,
         exi_codec=exi_codec,
         ev_controller=SimEVControllerWithEvccIdOverride(evcc_config, evcc_id_source),
-    ).start()
+    )
+
+    try:
+        await handler.start()
+    except HlcGaveUp:
+        # Returning normally is the recovery. start_evcc_handler clears its ready event and waits for the next
+        # start_charging, which constructs a new EVCCHandler with a full SDP retry budget - so the connector is
+        # usable again on the next plug-in instead of needing the manager restarted.
+        log.warning('ISO 15118 session ended after the stack gave up - the next plug-in will start a new one')
+
 
 class PyEVJosevModule():
     def __init__(self) -> None:

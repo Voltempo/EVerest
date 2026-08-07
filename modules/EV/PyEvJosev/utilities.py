@@ -139,3 +139,118 @@ def patch_josev_config(josev_config: EVCCConfig, everest_config: dict) -> None:
         josev_config.supported_energy_services = load_requested_energy_services(
              ['DC']
         )
+
+
+class _AuthorisationTimeoutOverride:
+    """
+    Stands in for Josev's shared Timeouts table, widening only the two values the EVCC uses as a budget for
+    "how long will I keep asking to be authorised". Every other timeout falls through to the real table unchanged.
+
+    Josev applies V2G_SECC_Sequence_Timeout (DIN, din_spec_states.ContractAuthentication) and
+    V2G_EVCC_Ongoing_Timeout (ISO 15118-2, iso15118_2_states.Authorization) - both 60 s - as cumulative
+    authorisation budgets. V2G_SECC_Sequence_Timeout is not that: it is the per-message-pair limit, the gap between
+    a request and its response. Using it to bound a whole authorisation is a misreading, and it makes the simulated
+    car abandon the session, permanently, 60 s after plugging in.
+
+    That is far stricter than any of the specs in play:
+
+        DIN SPEC 70121 Table 77   V2G_EVCC_ReadyToCharge_Timeout   250 s   (defined, and unused by Josev)
+        ISO 15118-20              EIM ongoing authorisation        180 s   (lib/everest/iso15118, TIMEOUT_EIM_ONGOING)
+        EVerest's own SECC        auth_timeout_eim                 300 s   (EvseV2G manifest default; 0 = forever)
+
+    and it matters because on a CSMS the authorisation is a person pressing a button.
+    """
+
+    def __init__(self, wrapped, seconds: float) -> None:
+        self._wrapped = wrapped
+        self.V2G_SECC_SEQUENCE_TIMEOUT = seconds
+        self.V2G_EVCC_ONGOING_TIMEOUT = seconds
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+
+def patch_josev_authorisation_timeout(seconds: float) -> None:
+    """
+    Widens how long the simulated car will wait to be authorised, by rebinding the Timeouts table the EVCC state
+    modules imported. Josev's own table is an Enum and cannot be edited in place, but both modules bound it with a
+    plain module-level import, so replacing that name reaches every use.
+
+    Pass 0 to leave Josev's stock 60 s alone.
+    """
+
+    if seconds <= 0:
+        log.info('EV authorisation timeout: leaving the Josev default of 60 s in place')
+        return
+
+    from iso15118.shared.messages.timeouts import Timeouts as SharedTimeouts
+    import iso15118.evcc.states.din_spec_states as din_spec_states
+    import iso15118.evcc.states.iso15118_2_states as iso15118_2_states
+
+    override = _AuthorisationTimeoutOverride(SharedTimeouts, float(seconds))
+
+    din_spec_states.TimeoutsShared = override
+    iso15118_2_states.TimeoutsShared = override
+
+    log.info(f'EV will wait up to {seconds:.0f} s to be authorised, instead of the Josev default of 60 s')
+
+
+class HlcGaveUp(BaseException):
+    """
+    Raised when the EVCC has exhausted its SDP retry budget and Josev would otherwise sit spinning.
+
+    Deliberately a BaseException: Josev catches SDPFailedError in two places and Exception in a third, and this
+    has to escape all of them so the session coroutine can finish. Finishing is the whole point - EVerest's
+    start_evcc_handler already builds a fresh EVCCHandler for every start_charging, so the moment the old one
+    returns, the next plug-in gets a working stack.
+    """
+
+
+def patch_josev_sdp_budget_recovery() -> None:
+    """
+    Makes the simulated car recover after its ISO 15118 stack shuts down, which upstream Josev does not do
+    despite its own error message promising it.
+
+    Josev counts SDP retry *cycles* on the CommunicationSessionHandler: _sdp_retry_cycles is set once in
+    __init__ and only ever decremented. When it hits zero the handler raises SDPFailedError with
+
+        "Shutting down high-level communication. Unplug and plug in the cable again if you want to start anew."
+
+    which is untrue - the budget lives on the handler, not on the cable, so replugging changes nothing and the
+    connector stays unable to charge until the manager is restarted. That is a real cost on a CSMS rig, where
+    every authorisation a person is slow to press burns the budget for good.
+
+    The handler itself survives: both places that catch SDPFailedError sit inside get_from_rcv_queue's main
+    loop and carry Josev's own "TODO not sure what else to do here". So the fix is not to restart anything, it
+    is to hand the budget back on the way out - after which the next plug-in genuinely does start anew.
+    """
+
+    from iso15118.evcc.comm_session_handler import (
+        CommunicationSessionHandler,
+        SDP_MAX_REQUEST_COUNTER,
+    )
+    from iso15118.shared.exceptions import SDPFailedError
+
+    if getattr(CommunicationSessionHandler.restart_sdp, '_voltempo_budget_recovery', False):
+        return
+
+    original_restart_sdp = CommunicationSessionHandler.restart_sdp
+
+    async def restart_sdp_with_budget_recovery(self, new_sdp_cycle: bool):
+        try:
+            return await original_restart_sdp(self, new_sdp_cycle)
+        except SDPFailedError:
+            # Still raised, so Josev's own flow is untouched - it logs and returns to the queue loop. The
+            # difference is that the next cable-in starts with a full budget instead of a dead stack.
+            self._sdp_retry_cycles = self.config.sdp_retry_cycles
+            self.sdp_retries_number = SDP_MAX_REQUEST_COUNTER
+            log.warning(
+                'ISO 15118 discovery gave up; ending this session so the next plug-in starts a fresh stack '
+                'rather than needing an EVerest restart'
+            )
+            raise HlcGaveUp from None
+
+    restart_sdp_with_budget_recovery._voltempo_budget_recovery = True
+    CommunicationSessionHandler.restart_sdp = restart_sdp_with_budget_recovery
+
+    log.info('ISO 15118 stack will recover its SDP retry budget after a shutdown')
