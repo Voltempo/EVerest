@@ -59,6 +59,8 @@ services:
       - type: bind
         source: ${SSH_AUTH_SOCK}
         target: /ssh-agent
+    # Overridden to sil-start.sh by docker-compose.buildvol.yml, which is where the local SIL
+    # autostart lives - it belongs with the /build volume mount that makes the manager binary exist.
     command: sleep infinity
     cap_add:
       - NET_ADMIN

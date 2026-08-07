@@ -49,10 +49,24 @@ active_modules:
           implementation_id: main
   powersupply_dc:
     module: DCSupplySimulator
+    config_implementation:
+      main:
+        # Defaults are 150 kW / 200 A, which bind well below the 250 kW target.
+        # 800 V x 312 A needs both raised. These are config_implementation, not
+        # config_module - they live under provides.main in the manifest.
+        max_power: 250000
+        nominal_max_export_power: 250000
+        nominal_max_import_power: 250000
+        max_current: 400.0
+        nominal_max_current: 400.0
   yeti_driver:
     module: YetiSimulator
     config_module:
       connector_id: 1
+      # Reported hardware capability. The energy manager derives available power from
+      # max_current_A_import * max_phase_count_import * nominal_voltage_V, so the stock
+      # 32 A AC-wallbox default caps a DC supply near 22 kW.
+      max_current_A_import: 400.0
   slac:
     module: SlacSimulator
   imd:
@@ -78,8 +92,13 @@ active_modules:
       auto_enable: true
       auto_exec: false
       auto_exec_commands: sleep 1;iec_wait_pwr_ready;sleep 1;draw_power_regulated 16,3;sleep 30;unplug
-      dc_target_current: 20
-      dc_target_voltage: 400
+      # 250 kW vehicle profile. dc_target_* is what the EV actually requests and is the
+      # binding constraint - 800 V x 312 A = 249.6 kW. Raising dc_max_* alone does nothing.
+      dc_target_current: 312
+      dc_target_voltage: 800
+      dc_max_power_limit: 250000
+      dc_max_current_limit: 350
+      dc_max_voltage_limit: 900
     connections:
       ev_board_support:
         - module_id: yeti_driver
@@ -130,6 +149,13 @@ active_modules:
     config_module:
       schedule_total_duration: 1
       schedule_interval_duration: 60
+      # The optimiser allocates power in fixed slices per trading round. At the 0.5 A /
+      # 500 W defaults, reaching ~362 A needs ~700 rounds - it exhausts the round budget
+      # partway and enforces whatever it reached (55.5 A = 38 kW), logging
+      # "Trading: Maximum number of trading rounds reached". Coarser slices converge
+      # within budget at the cost of less even distribution between EVSEs.
+      slice_ampere: 10.0
+      slice_watt: 5000
       debug: false
     connections:
       energy_trunk:
@@ -138,7 +164,8 @@ active_modules:
   grid_connection_point:
     module: EnergyNode
     config_module:
-      fuse_limit_A: 40.0
+      # Station-wide ceiling. Raised for 250 kW DC; the 40 A default caps around 27 kW.
+      fuse_limit_A: 400.0
       phase_count: 3
     connections:
       price_information: []
@@ -154,7 +181,8 @@ active_modules:
       module:
         evse: 1
     config_module:
-      fuse_limit_A: 32.0
+      # Per-EVSE ceiling. Raised for 250 kW DC; the 32 A default caps around 22 kW.
+      fuse_limit_A: 400.0
       phase_count: 3
     connections:
       energy_consumer:

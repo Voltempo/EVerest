@@ -1,1 +1,12 @@
+# .env is machine-specific - it carries this host's UID/GID and absolute workspace path,
+# so committing it would break every other developer. Generate it with `devrd env`, or
+# copy .env.example and edit. .env.example IS tracked.
 .env
+
+# The root .gitignore has `*build*`, which catches docker-compose.buildvol.yml.
+# It is required infrastructure - without it the everest-build volume never mounts
+# at /build - so re-include it explicitly.
+!docker-compose.buildvol.yml
+
+start-monta.ps1
+monta/

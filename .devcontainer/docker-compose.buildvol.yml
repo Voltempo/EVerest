@@ -1,0 +1,55 @@
+# Overrides for the devcontainer service. Tracked: the root .gitignore's `*build*` catches this
+# filename, and .devcontainer/.gitignore re-includes it explicitly - so changes here do show up in
+# `git status`.
+#
+# 1. Mounts the persistent EVerest build volume at /build.
+#
+#    Recreated to match the existing `everest-build` volume, whose CMakeCache.txt records:
+#      CMAKE_HOME_DIRECTORY = /workspace
+#      CMAKE_CACHEFILE_DIR  = /build
+#      CMAKE_INSTALL_PREFIX = /build/dist
+#
+#    Keeping the build off the Windows bind mount is what makes compilation tolerably fast, and it
+#    survives container recreation.
+#
+# 2. Replaces `sleep infinity` with sil-start.sh, so restarting the container brings EVerest back up
+#    instead of leaving a broker and a dashboard with nothing behind them. The script sets up the
+#    per-connector veth pairs, waits for the broker, and falls back to sleep infinity if anything
+#    goes wrong - so a failed start never costs you the shell you need to debug it.
+#
+#    The default config is the standalone one: 6 connectors, self-authorising, talking to nothing
+#    outside this machine. Deliberately not the 3-vSECC/Monta config - that one would register three
+#    live charge points with a commercial CSMS every time Docker started, which is not a thing that
+#    should happen as a side effect of booting.
+#
+#    It also differs in a way that decides whether a session ever charges. The standalone config runs
+#    DummyTokenProvider + DummyTokenValidator, so plugging in authorises itself; the 3-vSECC config
+#    runs DummyTokenProviderManual + OCPP, so a plugged-in connector holds at AuthRequired until the
+#    CSMS starts the charge. Anything driving a session unattended needs the standalone config.
+#
+#    Escape hatches, all settable in .devcontainer/.env:
+#      EVEREST_AUTOSTART=0     bare shell container, start EVerest by hand
+#      EVEREST_CONFIG=...      run a different config - use config-sil-6evse-3vsecc.yaml for OCPP to Monta
+#      EVEREST_CONNECTORS=N    veth pairs to create - must match the config
+#
+#    Watch it with `docker logs -f devcontainer-devcontainer-1`; the same output lands in
+#    /tmp/everest-manager.log inside the container.
+
+volumes:
+  everest-build:
+    external: true
+    name: everest-build
+
+services:
+  devcontainer:
+    volumes:
+      - type: volume
+        source: everest-build
+        target: /build
+    # Invoked through bash rather than executed directly: the script lives on a Windows bind mount,
+    # where the execute bit is not reliably ours to set.
+    command: ["bash", "/workspace/.devcontainer/sil-start.sh"]
+    environment:
+      EVEREST_AUTOSTART: "${EVEREST_AUTOSTART:-1}"
+      EVEREST_CONFIG: "${EVEREST_CONFIG:-/workspace/config/config-sil-6evse-dc.yaml}"
+      EVEREST_CONNECTORS: "${EVEREST_CONNECTORS:-6}"

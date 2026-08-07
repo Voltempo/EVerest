@@ -1,0 +1,1217 @@
+# 6-connector SIL DC configuration - GENERATED FILE, DO NOT EDIT BY HAND.
+#
+# Source: EVerest-MCP/sim/generate_sil_config.py
+# Regenerate: python sim/generate_sil_config.py --connectors 6 --output <this file>
+#
+# Models the Voltempo HGV charger: 6 DC connectors rated 375 kW each
+# (800 V x 468 A), on a 960 kW site.
+#
+# The site limit is lower than the sum of the connectors on purpose. All 6 vehicles asking
+# for their full rate is 2250 kW against 960 kW
+# available, so the site is what constrains them - which is what an OCPP charging profile has to
+# manage, and what a simulator sized at the sum of its connectors could never show.
+#
+# CSMS: connects over OCPP 1.6J using /build/monta/ocpp-monta.json. That file holds the charge point
+# identity, the CentralSystemURI and the authorisation key - libocpp appends the identity to the URI,
+# so wss://host + SIMON_EVEREST becomes wss://host/SIMON_EVEREST. NumberOfConnectors in it must match
+# the 6 connectors here or the CSMS will not show them all.
+#
+# A site-wide cap from the CSMS (an OCPP ChargePointMaxProfile on connector 0) lands on
+# grid_connection_point, which is mapped to evse 0 for exactly that reason.
+#
+# PREREQUISITE: every connector's charger and car talk over their own veth pair, because V2G
+# discovery in SIL is real link-local IPv6 multicast on UDP 15118. Run sil-net-setup.sh (which
+# creates ev1-evse/ev1-car .. ev6-evse/ev6-car) before
+# starting the manager, or the ISO 15118 modules will fail to bind and cars will pair with arbitrary
+# chargers.
+#
+# MQTT addressing:
+#   charger    everest_api/evse_manager_N/...            (keyed by EvseManager module id)
+#   car        everest_external/nodered/N/carsim/...     (keyed by EvManager connector_id)
+
+active_modules:
+  # ------------------------------------------------------------------ connector 1
+  iso15118_charger_1:
+    module: EvseV2G
+    config_module:
+      # Explicit, never 'auto'. EvseV2G resolves 'auto' to a hard-coded eth1 (v2g_ctx.cpp), which
+      # would put every charger on one link and let cars pair with the wrong one.
+      device: ev1-evse
+      tls_security: allow
+    connections:
+      security:
+        - module_id: evse_security
+          implementation_id: main
+  iso15118_car_1:
+    module: PyEvJosev
+    config_module:
+      # The other end of connector 1's veth pair. 'auto' picks the first interface with an IPv6
+      # link-local address, which is the same one for every car.
+      device: ev1-car
+      supported_DIN70121: true
+      supported_ISO15118_2: true
+  evse_manager_1:
+    module: EvseManager
+    mapping:
+      module:
+        evse: 1
+    config_module:
+      # The connector's id within its own vSECC, because that is what OCPP demands (see local_id).
+      # With one vSECC this is the same as the connector's position on the charger.
+      connector_id: 1
+      # eMI3-style id presented to the vehicle over ISO 15118. Globally unique across the charger even
+      # though connector_id is not - nothing in OCPP 1.6 carries this string, so it is free to be the
+      # human-meaningful one.
+      evse_id: UK*VTP*E00001*1
+      # Kept keyed on the connector's position on the charger, not its board. DIN 70121 wants a
+      # fixed-width id and nothing reads it back, so global numbering is the safer choice.
+      evse_id_din: 49A80737A45671
+      session_logging: true
+      session_logging_xml: false
+      session_logging_path: /tmp/everest-logs
+      charge_mode: DC
+      hack_allow_bpt_with_iso2: true
+      # Load-bearing, and off by default. Without it an idle connector keeps asking for its share of
+      # the site, so one vehicle on an otherwise empty charger is held to site/connectors rather than
+      # its own rating - which is exactly the real charger's flaw, arrived at by accident. With it,
+      # idle connectors release their share and the vehicles that are charging get it.
+      request_zero_power_in_idle: true
+      connector_type: cCCS2
+      external_ready_to_start_charging: true
+      enable_autocharge: true
+    connections:
+      store:
+        - module_id: persistent_store
+          implementation_id: main
+      bsp:
+        - module_id: yeti_driver_1
+          implementation_id: board_support
+      powermeter_car_side:
+        - module_id: powersupply_dc_1
+          implementation_id: powermeter
+      slac:
+        - module_id: slac_1
+          implementation_id: evse
+      hlc:
+        - module_id: iso15118_charger_1
+          implementation_id: charger
+      powersupply_DC:
+        - module_id: powersupply_dc_1
+          implementation_id: main
+      imd:
+        - module_id: imd_1
+          implementation_id: main
+      over_voltage_monitor:
+        - module_id: ovm_1
+          implementation_id: main
+  powersupply_dc_1:
+    module: DCSupplySimulator
+    config_implementation:
+      main:
+        # Defaults are 150 kW / 200 A, which bind well below the target. These are
+        # config_implementation, not config_module - they live under provides.main in the manifest.
+        max_power: 375000
+        nominal_max_export_power: 375000
+        nominal_max_import_power: 375000
+        max_current: 500.0
+        nominal_max_current: 500.0
+  yeti_driver_1:
+    module: YetiSimulator
+    mapping:
+      module:
+        evse: 1
+    config_module:
+      connector_id: 1
+      max_current_A_import: 600.0
+  slac_1:
+    module: SlacSimulator
+  imd_1:
+    module: IMDSimulator
+    config_implementation:
+      main:
+        selftest_success: true
+        resistance_F_Ohm: 900000
+  ovm_1:
+    module: OVMSimulator
+    config_implementation:
+      main:
+        simulate_emergency_shutdown: false
+        simulate_error_delay: 5
+    connections:
+      power_supply:
+        - module_id: powersupply_dc_1
+          implementation_id: main
+  ev_manager_1:
+    module: EvManager
+    config_module:
+      connector_id: 1
+      auto_enable: true
+      auto_exec: false
+      dc_target_current: 468
+      dc_target_voltage: 800
+      dc_max_power_limit: 375000
+      dc_max_current_limit: 500
+      dc_max_voltage_limit: 900
+    connections:
+      ev_board_support:
+        - module_id: yeti_driver_1
+          implementation_id: ev_board_support
+      ev:
+        - module_id: iso15118_car_1
+          implementation_id: ev
+      slac:
+        - module_id: slac_1
+          implementation_id: ev
+  api_sink_1:
+    module: EnergyNode
+    mapping:
+      module:
+        evse: 1
+    config_module:
+      # Per-connector ceiling. The API module only wires up set_limit_* for an EVSE that has a sink
+      # with a matching evse mapping, so one of these per connector is mandatory, not optional.
+      fuse_limit_A: 600.0
+      phase_count: 3
+    connections:
+      energy_consumer:
+        - module_id: ocpp_sink_1
+          implementation_id: energy_grid
+      powermeter:
+        - module_id: yeti_driver_1
+          implementation_id: powermeter
+  ocpp_sink_1:
+    module: EnergyNode
+    mapping:
+      module:
+        evse: 1
+    config_module:
+      fuse_limit_A: 600.0
+      phase_count: 3
+    connections:
+      energy_consumer:
+        - module_id: evse_manager_1
+          implementation_id: energy_grid
+  # ------------------------------------------------------------------ connector 2
+  iso15118_charger_2:
+    module: EvseV2G
+    config_module:
+      # Explicit, never 'auto'. EvseV2G resolves 'auto' to a hard-coded eth1 (v2g_ctx.cpp), which
+      # would put every charger on one link and let cars pair with the wrong one.
+      device: ev2-evse
+      tls_security: allow
+    connections:
+      security:
+        - module_id: evse_security
+          implementation_id: main
+  iso15118_car_2:
+    module: PyEvJosev
+    config_module:
+      # The other end of connector 2's veth pair. 'auto' picks the first interface with an IPv6
+      # link-local address, which is the same one for every car.
+      device: ev2-car
+      supported_DIN70121: true
+      supported_ISO15118_2: true
+  evse_manager_2:
+    module: EvseManager
+    mapping:
+      module:
+        evse: 2
+    config_module:
+      # The connector's id within its own vSECC, because that is what OCPP demands (see local_id).
+      # With one vSECC this is the same as the connector's position on the charger.
+      connector_id: 2
+      # eMI3-style id presented to the vehicle over ISO 15118. Globally unique across the charger even
+      # though connector_id is not - nothing in OCPP 1.6 carries this string, so it is free to be the
+      # human-meaningful one.
+      evse_id: UK*VTP*E00001*2
+      # Kept keyed on the connector's position on the charger, not its board. DIN 70121 wants a
+      # fixed-width id and nothing reads it back, so global numbering is the safer choice.
+      evse_id_din: 49A80737A45672
+      session_logging: true
+      session_logging_xml: false
+      session_logging_path: /tmp/everest-logs
+      charge_mode: DC
+      hack_allow_bpt_with_iso2: true
+      # Load-bearing, and off by default. Without it an idle connector keeps asking for its share of
+      # the site, so one vehicle on an otherwise empty charger is held to site/connectors rather than
+      # its own rating - which is exactly the real charger's flaw, arrived at by accident. With it,
+      # idle connectors release their share and the vehicles that are charging get it.
+      request_zero_power_in_idle: true
+      connector_type: cCCS2
+      external_ready_to_start_charging: true
+      enable_autocharge: true
+    connections:
+      store:
+        - module_id: persistent_store
+          implementation_id: main
+      bsp:
+        - module_id: yeti_driver_2
+          implementation_id: board_support
+      powermeter_car_side:
+        - module_id: powersupply_dc_2
+          implementation_id: powermeter
+      slac:
+        - module_id: slac_2
+          implementation_id: evse
+      hlc:
+        - module_id: iso15118_charger_2
+          implementation_id: charger
+      powersupply_DC:
+        - module_id: powersupply_dc_2
+          implementation_id: main
+      imd:
+        - module_id: imd_2
+          implementation_id: main
+      over_voltage_monitor:
+        - module_id: ovm_2
+          implementation_id: main
+  powersupply_dc_2:
+    module: DCSupplySimulator
+    config_implementation:
+      main:
+        # Defaults are 150 kW / 200 A, which bind well below the target. These are
+        # config_implementation, not config_module - they live under provides.main in the manifest.
+        max_power: 375000
+        nominal_max_export_power: 375000
+        nominal_max_import_power: 375000
+        max_current: 500.0
+        nominal_max_current: 500.0
+  yeti_driver_2:
+    module: YetiSimulator
+    mapping:
+      module:
+        evse: 2
+    config_module:
+      connector_id: 2
+      max_current_A_import: 600.0
+  slac_2:
+    module: SlacSimulator
+  imd_2:
+    module: IMDSimulator
+    config_implementation:
+      main:
+        selftest_success: true
+        resistance_F_Ohm: 900000
+  ovm_2:
+    module: OVMSimulator
+    config_implementation:
+      main:
+        simulate_emergency_shutdown: false
+        simulate_error_delay: 5
+    connections:
+      power_supply:
+        - module_id: powersupply_dc_2
+          implementation_id: main
+  ev_manager_2:
+    module: EvManager
+    config_module:
+      connector_id: 2
+      auto_enable: true
+      auto_exec: false
+      dc_target_current: 468
+      dc_target_voltage: 800
+      dc_max_power_limit: 375000
+      dc_max_current_limit: 500
+      dc_max_voltage_limit: 900
+    connections:
+      ev_board_support:
+        - module_id: yeti_driver_2
+          implementation_id: ev_board_support
+      ev:
+        - module_id: iso15118_car_2
+          implementation_id: ev
+      slac:
+        - module_id: slac_2
+          implementation_id: ev
+  api_sink_2:
+    module: EnergyNode
+    mapping:
+      module:
+        evse: 2
+    config_module:
+      # Per-connector ceiling. The API module only wires up set_limit_* for an EVSE that has a sink
+      # with a matching evse mapping, so one of these per connector is mandatory, not optional.
+      fuse_limit_A: 600.0
+      phase_count: 3
+    connections:
+      energy_consumer:
+        - module_id: ocpp_sink_2
+          implementation_id: energy_grid
+      powermeter:
+        - module_id: yeti_driver_2
+          implementation_id: powermeter
+  ocpp_sink_2:
+    module: EnergyNode
+    mapping:
+      module:
+        evse: 2
+    config_module:
+      fuse_limit_A: 600.0
+      phase_count: 3
+    connections:
+      energy_consumer:
+        - module_id: evse_manager_2
+          implementation_id: energy_grid
+  # ------------------------------------------------------------------ connector 3
+  iso15118_charger_3:
+    module: EvseV2G
+    config_module:
+      # Explicit, never 'auto'. EvseV2G resolves 'auto' to a hard-coded eth1 (v2g_ctx.cpp), which
+      # would put every charger on one link and let cars pair with the wrong one.
+      device: ev3-evse
+      tls_security: allow
+    connections:
+      security:
+        - module_id: evse_security
+          implementation_id: main
+  iso15118_car_3:
+    module: PyEvJosev
+    config_module:
+      # The other end of connector 3's veth pair. 'auto' picks the first interface with an IPv6
+      # link-local address, which is the same one for every car.
+      device: ev3-car
+      supported_DIN70121: true
+      supported_ISO15118_2: true
+  evse_manager_3:
+    module: EvseManager
+    mapping:
+      module:
+        evse: 3
+    config_module:
+      # The connector's id within its own vSECC, because that is what OCPP demands (see local_id).
+      # With one vSECC this is the same as the connector's position on the charger.
+      connector_id: 3
+      # eMI3-style id presented to the vehicle over ISO 15118. Globally unique across the charger even
+      # though connector_id is not - nothing in OCPP 1.6 carries this string, so it is free to be the
+      # human-meaningful one.
+      evse_id: UK*VTP*E00001*3
+      # Kept keyed on the connector's position on the charger, not its board. DIN 70121 wants a
+      # fixed-width id and nothing reads it back, so global numbering is the safer choice.
+      evse_id_din: 49A80737A45673
+      session_logging: true
+      session_logging_xml: false
+      session_logging_path: /tmp/everest-logs
+      charge_mode: DC
+      hack_allow_bpt_with_iso2: true
+      # Load-bearing, and off by default. Without it an idle connector keeps asking for its share of
+      # the site, so one vehicle on an otherwise empty charger is held to site/connectors rather than
+      # its own rating - which is exactly the real charger's flaw, arrived at by accident. With it,
+      # idle connectors release their share and the vehicles that are charging get it.
+      request_zero_power_in_idle: true
+      connector_type: cCCS2
+      external_ready_to_start_charging: true
+      enable_autocharge: true
+    connections:
+      store:
+        - module_id: persistent_store
+          implementation_id: main
+      bsp:
+        - module_id: yeti_driver_3
+          implementation_id: board_support
+      powermeter_car_side:
+        - module_id: powersupply_dc_3
+          implementation_id: powermeter
+      slac:
+        - module_id: slac_3
+          implementation_id: evse
+      hlc:
+        - module_id: iso15118_charger_3
+          implementation_id: charger
+      powersupply_DC:
+        - module_id: powersupply_dc_3
+          implementation_id: main
+      imd:
+        - module_id: imd_3
+          implementation_id: main
+      over_voltage_monitor:
+        - module_id: ovm_3
+          implementation_id: main
+  powersupply_dc_3:
+    module: DCSupplySimulator
+    config_implementation:
+      main:
+        # Defaults are 150 kW / 200 A, which bind well below the target. These are
+        # config_implementation, not config_module - they live under provides.main in the manifest.
+        max_power: 375000
+        nominal_max_export_power: 375000
+        nominal_max_import_power: 375000
+        max_current: 500.0
+        nominal_max_current: 500.0
+  yeti_driver_3:
+    module: YetiSimulator
+    mapping:
+      module:
+        evse: 3
+    config_module:
+      connector_id: 3
+      max_current_A_import: 600.0
+  slac_3:
+    module: SlacSimulator
+  imd_3:
+    module: IMDSimulator
+    config_implementation:
+      main:
+        selftest_success: true
+        resistance_F_Ohm: 900000
+  ovm_3:
+    module: OVMSimulator
+    config_implementation:
+      main:
+        simulate_emergency_shutdown: false
+        simulate_error_delay: 5
+    connections:
+      power_supply:
+        - module_id: powersupply_dc_3
+          implementation_id: main
+  ev_manager_3:
+    module: EvManager
+    config_module:
+      connector_id: 3
+      auto_enable: true
+      auto_exec: false
+      dc_target_current: 468
+      dc_target_voltage: 800
+      dc_max_power_limit: 375000
+      dc_max_current_limit: 500
+      dc_max_voltage_limit: 900
+    connections:
+      ev_board_support:
+        - module_id: yeti_driver_3
+          implementation_id: ev_board_support
+      ev:
+        - module_id: iso15118_car_3
+          implementation_id: ev
+      slac:
+        - module_id: slac_3
+          implementation_id: ev
+  api_sink_3:
+    module: EnergyNode
+    mapping:
+      module:
+        evse: 3
+    config_module:
+      # Per-connector ceiling. The API module only wires up set_limit_* for an EVSE that has a sink
+      # with a matching evse mapping, so one of these per connector is mandatory, not optional.
+      fuse_limit_A: 600.0
+      phase_count: 3
+    connections:
+      energy_consumer:
+        - module_id: ocpp_sink_3
+          implementation_id: energy_grid
+      powermeter:
+        - module_id: yeti_driver_3
+          implementation_id: powermeter
+  ocpp_sink_3:
+    module: EnergyNode
+    mapping:
+      module:
+        evse: 3
+    config_module:
+      fuse_limit_A: 600.0
+      phase_count: 3
+    connections:
+      energy_consumer:
+        - module_id: evse_manager_3
+          implementation_id: energy_grid
+  # ------------------------------------------------------------------ connector 4
+  iso15118_charger_4:
+    module: EvseV2G
+    config_module:
+      # Explicit, never 'auto'. EvseV2G resolves 'auto' to a hard-coded eth1 (v2g_ctx.cpp), which
+      # would put every charger on one link and let cars pair with the wrong one.
+      device: ev4-evse
+      tls_security: allow
+    connections:
+      security:
+        - module_id: evse_security
+          implementation_id: main
+  iso15118_car_4:
+    module: PyEvJosev
+    config_module:
+      # The other end of connector 4's veth pair. 'auto' picks the first interface with an IPv6
+      # link-local address, which is the same one for every car.
+      device: ev4-car
+      supported_DIN70121: true
+      supported_ISO15118_2: true
+  evse_manager_4:
+    module: EvseManager
+    mapping:
+      module:
+        evse: 4
+    config_module:
+      # The connector's id within its own vSECC, because that is what OCPP demands (see local_id).
+      # With one vSECC this is the same as the connector's position on the charger.
+      connector_id: 4
+      # eMI3-style id presented to the vehicle over ISO 15118. Globally unique across the charger even
+      # though connector_id is not - nothing in OCPP 1.6 carries this string, so it is free to be the
+      # human-meaningful one.
+      evse_id: UK*VTP*E00001*4
+      # Kept keyed on the connector's position on the charger, not its board. DIN 70121 wants a
+      # fixed-width id and nothing reads it back, so global numbering is the safer choice.
+      evse_id_din: 49A80737A45674
+      session_logging: true
+      session_logging_xml: false
+      session_logging_path: /tmp/everest-logs
+      charge_mode: DC
+      hack_allow_bpt_with_iso2: true
+      # Load-bearing, and off by default. Without it an idle connector keeps asking for its share of
+      # the site, so one vehicle on an otherwise empty charger is held to site/connectors rather than
+      # its own rating - which is exactly the real charger's flaw, arrived at by accident. With it,
+      # idle connectors release their share and the vehicles that are charging get it.
+      request_zero_power_in_idle: true
+      connector_type: cCCS2
+      external_ready_to_start_charging: true
+      enable_autocharge: true
+    connections:
+      store:
+        - module_id: persistent_store
+          implementation_id: main
+      bsp:
+        - module_id: yeti_driver_4
+          implementation_id: board_support
+      powermeter_car_side:
+        - module_id: powersupply_dc_4
+          implementation_id: powermeter
+      slac:
+        - module_id: slac_4
+          implementation_id: evse
+      hlc:
+        - module_id: iso15118_charger_4
+          implementation_id: charger
+      powersupply_DC:
+        - module_id: powersupply_dc_4
+          implementation_id: main
+      imd:
+        - module_id: imd_4
+          implementation_id: main
+      over_voltage_monitor:
+        - module_id: ovm_4
+          implementation_id: main
+  powersupply_dc_4:
+    module: DCSupplySimulator
+    config_implementation:
+      main:
+        # Defaults are 150 kW / 200 A, which bind well below the target. These are
+        # config_implementation, not config_module - they live under provides.main in the manifest.
+        max_power: 375000
+        nominal_max_export_power: 375000
+        nominal_max_import_power: 375000
+        max_current: 500.0
+        nominal_max_current: 500.0
+  yeti_driver_4:
+    module: YetiSimulator
+    mapping:
+      module:
+        evse: 4
+    config_module:
+      connector_id: 4
+      max_current_A_import: 600.0
+  slac_4:
+    module: SlacSimulator
+  imd_4:
+    module: IMDSimulator
+    config_implementation:
+      main:
+        selftest_success: true
+        resistance_F_Ohm: 900000
+  ovm_4:
+    module: OVMSimulator
+    config_implementation:
+      main:
+        simulate_emergency_shutdown: false
+        simulate_error_delay: 5
+    connections:
+      power_supply:
+        - module_id: powersupply_dc_4
+          implementation_id: main
+  ev_manager_4:
+    module: EvManager
+    config_module:
+      connector_id: 4
+      auto_enable: true
+      auto_exec: false
+      dc_target_current: 468
+      dc_target_voltage: 800
+      dc_max_power_limit: 375000
+      dc_max_current_limit: 500
+      dc_max_voltage_limit: 900
+    connections:
+      ev_board_support:
+        - module_id: yeti_driver_4
+          implementation_id: ev_board_support
+      ev:
+        - module_id: iso15118_car_4
+          implementation_id: ev
+      slac:
+        - module_id: slac_4
+          implementation_id: ev
+  api_sink_4:
+    module: EnergyNode
+    mapping:
+      module:
+        evse: 4
+    config_module:
+      # Per-connector ceiling. The API module only wires up set_limit_* for an EVSE that has a sink
+      # with a matching evse mapping, so one of these per connector is mandatory, not optional.
+      fuse_limit_A: 600.0
+      phase_count: 3
+    connections:
+      energy_consumer:
+        - module_id: ocpp_sink_4
+          implementation_id: energy_grid
+      powermeter:
+        - module_id: yeti_driver_4
+          implementation_id: powermeter
+  ocpp_sink_4:
+    module: EnergyNode
+    mapping:
+      module:
+        evse: 4
+    config_module:
+      fuse_limit_A: 600.0
+      phase_count: 3
+    connections:
+      energy_consumer:
+        - module_id: evse_manager_4
+          implementation_id: energy_grid
+  # ------------------------------------------------------------------ connector 5
+  iso15118_charger_5:
+    module: EvseV2G
+    config_module:
+      # Explicit, never 'auto'. EvseV2G resolves 'auto' to a hard-coded eth1 (v2g_ctx.cpp), which
+      # would put every charger on one link and let cars pair with the wrong one.
+      device: ev5-evse
+      tls_security: allow
+    connections:
+      security:
+        - module_id: evse_security
+          implementation_id: main
+  iso15118_car_5:
+    module: PyEvJosev
+    config_module:
+      # The other end of connector 5's veth pair. 'auto' picks the first interface with an IPv6
+      # link-local address, which is the same one for every car.
+      device: ev5-car
+      supported_DIN70121: true
+      supported_ISO15118_2: true
+  evse_manager_5:
+    module: EvseManager
+    mapping:
+      module:
+        evse: 5
+    config_module:
+      # The connector's id within its own vSECC, because that is what OCPP demands (see local_id).
+      # With one vSECC this is the same as the connector's position on the charger.
+      connector_id: 5
+      # eMI3-style id presented to the vehicle over ISO 15118. Globally unique across the charger even
+      # though connector_id is not - nothing in OCPP 1.6 carries this string, so it is free to be the
+      # human-meaningful one.
+      evse_id: UK*VTP*E00001*5
+      # Kept keyed on the connector's position on the charger, not its board. DIN 70121 wants a
+      # fixed-width id and nothing reads it back, so global numbering is the safer choice.
+      evse_id_din: 49A80737A45675
+      session_logging: true
+      session_logging_xml: false
+      session_logging_path: /tmp/everest-logs
+      charge_mode: DC
+      hack_allow_bpt_with_iso2: true
+      # Load-bearing, and off by default. Without it an idle connector keeps asking for its share of
+      # the site, so one vehicle on an otherwise empty charger is held to site/connectors rather than
+      # its own rating - which is exactly the real charger's flaw, arrived at by accident. With it,
+      # idle connectors release their share and the vehicles that are charging get it.
+      request_zero_power_in_idle: true
+      connector_type: cCCS2
+      external_ready_to_start_charging: true
+      enable_autocharge: true
+    connections:
+      store:
+        - module_id: persistent_store
+          implementation_id: main
+      bsp:
+        - module_id: yeti_driver_5
+          implementation_id: board_support
+      powermeter_car_side:
+        - module_id: powersupply_dc_5
+          implementation_id: powermeter
+      slac:
+        - module_id: slac_5
+          implementation_id: evse
+      hlc:
+        - module_id: iso15118_charger_5
+          implementation_id: charger
+      powersupply_DC:
+        - module_id: powersupply_dc_5
+          implementation_id: main
+      imd:
+        - module_id: imd_5
+          implementation_id: main
+      over_voltage_monitor:
+        - module_id: ovm_5
+          implementation_id: main
+  powersupply_dc_5:
+    module: DCSupplySimulator
+    config_implementation:
+      main:
+        # Defaults are 150 kW / 200 A, which bind well below the target. These are
+        # config_implementation, not config_module - they live under provides.main in the manifest.
+        max_power: 375000
+        nominal_max_export_power: 375000
+        nominal_max_import_power: 375000
+        max_current: 500.0
+        nominal_max_current: 500.0
+  yeti_driver_5:
+    module: YetiSimulator
+    mapping:
+      module:
+        evse: 5
+    config_module:
+      connector_id: 5
+      max_current_A_import: 600.0
+  slac_5:
+    module: SlacSimulator
+  imd_5:
+    module: IMDSimulator
+    config_implementation:
+      main:
+        selftest_success: true
+        resistance_F_Ohm: 900000
+  ovm_5:
+    module: OVMSimulator
+    config_implementation:
+      main:
+        simulate_emergency_shutdown: false
+        simulate_error_delay: 5
+    connections:
+      power_supply:
+        - module_id: powersupply_dc_5
+          implementation_id: main
+  ev_manager_5:
+    module: EvManager
+    config_module:
+      connector_id: 5
+      auto_enable: true
+      auto_exec: false
+      dc_target_current: 468
+      dc_target_voltage: 800
+      dc_max_power_limit: 375000
+      dc_max_current_limit: 500
+      dc_max_voltage_limit: 900
+    connections:
+      ev_board_support:
+        - module_id: yeti_driver_5
+          implementation_id: ev_board_support
+      ev:
+        - module_id: iso15118_car_5
+          implementation_id: ev
+      slac:
+        - module_id: slac_5
+          implementation_id: ev
+  api_sink_5:
+    module: EnergyNode
+    mapping:
+      module:
+        evse: 5
+    config_module:
+      # Per-connector ceiling. The API module only wires up set_limit_* for an EVSE that has a sink
+      # with a matching evse mapping, so one of these per connector is mandatory, not optional.
+      fuse_limit_A: 600.0
+      phase_count: 3
+    connections:
+      energy_consumer:
+        - module_id: ocpp_sink_5
+          implementation_id: energy_grid
+      powermeter:
+        - module_id: yeti_driver_5
+          implementation_id: powermeter
+  ocpp_sink_5:
+    module: EnergyNode
+    mapping:
+      module:
+        evse: 5
+    config_module:
+      fuse_limit_A: 600.0
+      phase_count: 3
+    connections:
+      energy_consumer:
+        - module_id: evse_manager_5
+          implementation_id: energy_grid
+  # ------------------------------------------------------------------ connector 6
+  iso15118_charger_6:
+    module: EvseV2G
+    config_module:
+      # Explicit, never 'auto'. EvseV2G resolves 'auto' to a hard-coded eth1 (v2g_ctx.cpp), which
+      # would put every charger on one link and let cars pair with the wrong one.
+      device: ev6-evse
+      tls_security: allow
+    connections:
+      security:
+        - module_id: evse_security
+          implementation_id: main
+  iso15118_car_6:
+    module: PyEvJosev
+    config_module:
+      # The other end of connector 6's veth pair. 'auto' picks the first interface with an IPv6
+      # link-local address, which is the same one for every car.
+      device: ev6-car
+      supported_DIN70121: true
+      supported_ISO15118_2: true
+  evse_manager_6:
+    module: EvseManager
+    mapping:
+      module:
+        evse: 6
+    config_module:
+      # The connector's id within its own vSECC, because that is what OCPP demands (see local_id).
+      # With one vSECC this is the same as the connector's position on the charger.
+      connector_id: 6
+      # eMI3-style id presented to the vehicle over ISO 15118. Globally unique across the charger even
+      # though connector_id is not - nothing in OCPP 1.6 carries this string, so it is free to be the
+      # human-meaningful one.
+      evse_id: UK*VTP*E00001*6
+      # Kept keyed on the connector's position on the charger, not its board. DIN 70121 wants a
+      # fixed-width id and nothing reads it back, so global numbering is the safer choice.
+      evse_id_din: 49A80737A45676
+      session_logging: true
+      session_logging_xml: false
+      session_logging_path: /tmp/everest-logs
+      charge_mode: DC
+      hack_allow_bpt_with_iso2: true
+      # Load-bearing, and off by default. Without it an idle connector keeps asking for its share of
+      # the site, so one vehicle on an otherwise empty charger is held to site/connectors rather than
+      # its own rating - which is exactly the real charger's flaw, arrived at by accident. With it,
+      # idle connectors release their share and the vehicles that are charging get it.
+      request_zero_power_in_idle: true
+      connector_type: cCCS2
+      external_ready_to_start_charging: true
+      enable_autocharge: true
+    connections:
+      store:
+        - module_id: persistent_store
+          implementation_id: main
+      bsp:
+        - module_id: yeti_driver_6
+          implementation_id: board_support
+      powermeter_car_side:
+        - module_id: powersupply_dc_6
+          implementation_id: powermeter
+      slac:
+        - module_id: slac_6
+          implementation_id: evse
+      hlc:
+        - module_id: iso15118_charger_6
+          implementation_id: charger
+      powersupply_DC:
+        - module_id: powersupply_dc_6
+          implementation_id: main
+      imd:
+        - module_id: imd_6
+          implementation_id: main
+      over_voltage_monitor:
+        - module_id: ovm_6
+          implementation_id: main
+  powersupply_dc_6:
+    module: DCSupplySimulator
+    config_implementation:
+      main:
+        # Defaults are 150 kW / 200 A, which bind well below the target. These are
+        # config_implementation, not config_module - they live under provides.main in the manifest.
+        max_power: 375000
+        nominal_max_export_power: 375000
+        nominal_max_import_power: 375000
+        max_current: 500.0
+        nominal_max_current: 500.0
+  yeti_driver_6:
+    module: YetiSimulator
+    mapping:
+      module:
+        evse: 6
+    config_module:
+      connector_id: 6
+      max_current_A_import: 600.0
+  slac_6:
+    module: SlacSimulator
+  imd_6:
+    module: IMDSimulator
+    config_implementation:
+      main:
+        selftest_success: true
+        resistance_F_Ohm: 900000
+  ovm_6:
+    module: OVMSimulator
+    config_implementation:
+      main:
+        simulate_emergency_shutdown: false
+        simulate_error_delay: 5
+    connections:
+      power_supply:
+        - module_id: powersupply_dc_6
+          implementation_id: main
+  ev_manager_6:
+    module: EvManager
+    config_module:
+      connector_id: 6
+      auto_enable: true
+      auto_exec: false
+      dc_target_current: 468
+      dc_target_voltage: 800
+      dc_max_power_limit: 375000
+      dc_max_current_limit: 500
+      dc_max_voltage_limit: 900
+    connections:
+      ev_board_support:
+        - module_id: yeti_driver_6
+          implementation_id: ev_board_support
+      ev:
+        - module_id: iso15118_car_6
+          implementation_id: ev
+      slac:
+        - module_id: slac_6
+          implementation_id: ev
+  api_sink_6:
+    module: EnergyNode
+    mapping:
+      module:
+        evse: 6
+    config_module:
+      # Per-connector ceiling. The API module only wires up set_limit_* for an EVSE that has a sink
+      # with a matching evse mapping, so one of these per connector is mandatory, not optional.
+      fuse_limit_A: 600.0
+      phase_count: 3
+    connections:
+      energy_consumer:
+        - module_id: ocpp_sink_6
+          implementation_id: energy_grid
+      powermeter:
+        - module_id: yeti_driver_6
+          implementation_id: powermeter
+  ocpp_sink_6:
+    module: EnergyNode
+    mapping:
+      module:
+        evse: 6
+    config_module:
+      fuse_limit_A: 600.0
+      phase_count: 3
+    connections:
+      energy_consumer:
+        - module_id: evse_manager_6
+          implementation_id: energy_grid
+  # ------------------------------------------------------------------ shared station services
+  auth:
+    module: Auth
+    config_module:
+      connection_timeout: 10
+      selection_algorithm: PlugEventsLIFO
+    connections:
+      token_provider:
+        - module_id: token_provider_manual
+          implementation_id: main
+        - module_id: ocpp
+          implementation_id: auth_provider
+        - module_id: evse_manager_1
+          implementation_id: token_provider
+        - module_id: evse_manager_2
+          implementation_id: token_provider
+        - module_id: evse_manager_3
+          implementation_id: token_provider
+        - module_id: evse_manager_4
+          implementation_id: token_provider
+        - module_id: evse_manager_5
+          implementation_id: token_provider
+        - module_id: evse_manager_6
+          implementation_id: token_provider
+      token_validator:
+        - module_id: ocpp
+          implementation_id: auth_validator
+      evse_manager:
+        - module_id: evse_manager_1
+          implementation_id: evse
+        - module_id: evse_manager_2
+          implementation_id: evse
+        - module_id: evse_manager_3
+          implementation_id: evse
+        - module_id: evse_manager_4
+          implementation_id: evse
+        - module_id: evse_manager_5
+          implementation_id: evse
+        - module_id: evse_manager_6
+          implementation_id: evse
+  token_provider_manual:
+    module: DummyTokenProviderManual
+    config_implementation:
+      main:
+        mqtt_topic: everest_api/dummy_token_provider/cmd/provide
+  # ------------------------------------------------------------------ CSMS link (OCPP 1.6J)
+  ocpp:
+    module: OCPP
+    config_module:
+      ChargePointConfigPath: /build/monta/ocpp-monta.json
+      UserConfigPath: /build/monta/user_config.json
+      DatabasePath: /build/monta/db
+      MessageLogPath: /build/monta/logs
+      # Charging profiles arrive and are reported in watts. A site allowance is a watt figure, and
+      # asking for it back in amps would round it through 690 W per amp for no reason.
+      RequestCompositeScheduleUnit: W
+    connections:
+      evse_manager:
+        - module_id: evse_manager_1
+          implementation_id: evse
+        - module_id: evse_manager_2
+          implementation_id: evse
+        - module_id: evse_manager_3
+          implementation_id: evse
+        - module_id: evse_manager_4
+          implementation_id: evse
+        - module_id: evse_manager_5
+          implementation_id: evse
+        - module_id: evse_manager_6
+          implementation_id: evse
+      auth:
+        - module_id: auth
+          implementation_id: main
+      reservation:
+        - module_id: auth
+          implementation_id: reservation
+      system:
+        - module_id: system
+          implementation_id: main
+      security:
+        - module_id: evse_security
+          implementation_id: main
+      display_message:
+        - module_id: display_message
+          implementation_id: display_message
+      evse_energy_sink:
+        # evse 0 first: the whole-station sink a ChargePointMaxProfile writes to.
+        - module_id: grid_connection_point
+          implementation_id: external_limits
+        - module_id: ocpp_sink_1
+          implementation_id: external_limits
+        - module_id: ocpp_sink_2
+          implementation_id: external_limits
+        - module_id: ocpp_sink_3
+          implementation_id: external_limits
+        - module_id: ocpp_sink_4
+          implementation_id: external_limits
+        - module_id: ocpp_sink_5
+          implementation_id: external_limits
+        - module_id: ocpp_sink_6
+          implementation_id: external_limits
+  system:
+    module: System
+  display_message:
+    module: TerminalDisplayMessage
+  session_cost:
+    module: TerminalCostAndPriceMessage
+    connections:
+      session_cost:
+        - module_id: ocpp
+          implementation_id: session_cost
+  persistent_store:
+    module: PersistentStore
+    config_module:
+      sqlite_db_file_path: /build/monta/persistent_store.db
+  evse_security:
+    module: EvseSecurity
+    config_module:
+      private_key_password: "123456"
+  energy_manager:
+    module: EnergyManager
+    config_module:
+      schedule_total_duration: 1
+      schedule_interval_duration: 60
+      # The optimiser allocates power in fixed slices per trading round and gives up when it runs out
+      # of rounds, enforcing whatever it had reached and logging "Trading: Maximum number of trading
+      # rounds reached". Every connector consumes rounds, so the slices have to grow with the
+      # connector count. Coarser slices converge within budget at the cost of less even distribution.
+      slice_ampere: 10.0
+      slice_watt: 5000
+      debug: false
+    connections:
+      energy_trunk:
+        - module_id: grid_connection_point
+          implementation_id: energy_grid
+  grid_connection_point:
+    module: EnergyNode
+    mapping:
+      module:
+        evse: 0
+    config_module:
+      # The whole station: 960 kW. Power is fuse_limit_A x phase_count x
+      # 230 V, so this is 960000 W / 690 W per amp.
+      # Deliberately below the sum of the connectors, because a site that can always give every
+      # connector its full rate never exercises the thing under test.
+      fuse_limit_A: 1391.3
+      phase_count: 3
+    connections:
+      price_information: []
+      energy_consumer:
+        - module_id: api_sink_1
+          implementation_id: energy_grid
+        - module_id: api_sink_2
+          implementation_id: energy_grid
+        - module_id: api_sink_3
+          implementation_id: energy_grid
+        - module_id: api_sink_4
+          implementation_id: energy_grid
+        - module_id: api_sink_5
+          implementation_id: energy_grid
+        - module_id: api_sink_6
+          implementation_id: energy_grid
+  api:
+    module: API
+    connections:
+      evse_manager:
+        - module_id: evse_manager_1
+          implementation_id: evse
+        - module_id: evse_manager_2
+          implementation_id: evse
+        - module_id: evse_manager_3
+          implementation_id: evse
+        - module_id: evse_manager_4
+          implementation_id: evse
+        - module_id: evse_manager_5
+          implementation_id: evse
+        - module_id: evse_manager_6
+          implementation_id: evse
+      error_history:
+        - module_id: error_history
+          implementation_id: error_history
+      ocpp:
+        - module_id: ocpp
+          implementation_id: ocpp_generic
+      evse_energy_sink:
+        - module_id: api_sink_1
+          implementation_id: external_limits
+        - module_id: api_sink_2
+          implementation_id: external_limits
+        - module_id: api_sink_3
+          implementation_id: external_limits
+        - module_id: api_sink_4
+          implementation_id: external_limits
+        - module_id: api_sink_5
+          implementation_id: external_limits
+        - module_id: api_sink_6
+          implementation_id: external_limits
+  ev_api:
+    module: EvAPI
+    connections:
+      ev_manager:
+        - module_id: ev_manager_1
+          implementation_id: ev_manager
+        - module_id: ev_manager_2
+          implementation_id: ev_manager
+        - module_id: ev_manager_3
+          implementation_id: ev_manager
+        - module_id: ev_manager_4
+          implementation_id: ev_manager
+        - module_id: ev_manager_5
+          implementation_id: ev_manager
+        - module_id: ev_manager_6
+          implementation_id: ev_manager
+  error_history:
+    module: ErrorHistory
+    config_implementation:
+      error_history:
+        database_path: /tmp/error_history.db
+x-module-layout: {}
