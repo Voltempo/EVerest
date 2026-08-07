@@ -1,0 +1,90 @@
+{
+  "_comment": [
+    "Template for one vSECC board's OCPP 1.6J config. Copy to /build/monta/vseccN/ocpp-monta.json,",
+    "or let .devcontainer/monta-setup.sh stamp out all three. See the CSMS section of",
+    ".devcontainer/README.md.",
+    "",
+    "Three fields differ per board and must be filled in - everything else is identical:",
+    "  Internal.ChargePointId        the identity you created in the CSMS, e.g. MYNAME_EVEREST_1",
+    "  Internal.ChargeBoxSerialNumber  any per-board string, e.g. 0002-1",
+    "  Security.AuthorizationKey     the key the CSMS issued for THAT charge point. Never commit it.",
+    "",
+    "NumberOfConnectors is 2 because one vSECC serves two connectors. Connector ids restart at 1 on",
+    "each board, so all three boards report connectors 1 and 2 - EVerest forces that.",
+    "",
+    "CompositeScheduleDefaultLimitWatts is what the CSMS assumes when no profile is active. Monta's",
+    "default is 240 kW, which is BELOW this rig's 375 kW connector rating - so a charging profile is",
+    "only observable if it asks for less than 240 kW."
+  ],
+
+  "Internal": {
+    "ChargePointId": "REPLACE_ME_1",
+    "CentralSystemURI": "wss://ocpp.monta.app",
+    "ChargeBoxSerialNumber": "0002-1",
+    "ChargePointModel": "EVerest-SIL",
+    "ChargePointVendor": "EVerest",
+    "FirmwareVersion": "2026.10.0",
+    "AllowChargingProfileWithoutStartSchedule": true,
+    "UseTPM": false,
+    "LogMessagesFormat": ["html", "security"],
+    "CompositeScheduleDefaultLimitWatts": 240000,
+    "CompositeScheduleDefaultLimitAmps": 400
+  },
+
+  "Core": {
+    "AuthorizeRemoteTxRequests": false,
+    "ClockAlignedDataInterval": 900,
+    "ConnectionTimeOut": 30,
+    "ConnectorPhaseRotation": "0.RST,1.RST,2.RST",
+    "GetConfigurationMaxKeys": 100,
+    "HeartbeatInterval": 300,
+    "LocalAuthorizeOffline": false,
+    "LocalPreAuthorize": false,
+    "MeterValuesAlignedData": "Energy.Active.Import.Register",
+    "MeterValuesSampledData": "Energy.Active.Import.Register,SoC",
+    "MeterValueSampleInterval": 60,
+    "NumberOfConnectors": 2,
+    "ResetRetries": 1,
+    "StopTransactionOnInvalidId": true,
+    "StopTxnAlignedData": "Energy.Active.Import.Register",
+    "StopTxnSampledData": "Energy.Active.Import.Register",
+    "SupportedFeatureProfiles": "Core,FirmwareManagement,RemoteTrigger,Reservation,LocalAuthListManagement,SmartCharging",
+    "TransactionMessageAttempts": 3,
+    "TransactionMessageRetryInterval": 10,
+    "UnlockConnectorOnEVSideDisconnect": true,
+    "WebSocketPingInterval": 30
+  },
+
+  "FirmwareManagement": {
+    "SupportedFileTransferProtocols": "FTP"
+  },
+
+  "Security": {
+    "CpoName": "EVerest",
+    "SecurityProfile": 2,
+    "AuthorizationKey": "REPLACE_ME_WITH_THE_CSMS_KEY"
+  },
+
+  "LocalAuthListManagement": {
+    "LocalAuthListEnabled": true,
+    "LocalAuthListMaxLength": 42,
+    "SendLocalListMaxLength": 42
+  },
+
+  "SmartCharging": {
+    "ChargeProfileMaxStackLevel": 42,
+    "ChargingScheduleAllowedChargingRateUnit": "Current,Power",
+    "ChargingScheduleMaxPeriods": 42,
+    "MaxChargingProfilesInstalled": 42
+  },
+
+  "PnC": {
+    "ISO15118CertificateManagementEnabled": true,
+    "ISO15118PnCEnabled": false,
+    "ContractValidationOffline": true
+  },
+
+  "CostAndPrice": {
+    "CustomDisplayCostAndPrice": false
+  }
+}
