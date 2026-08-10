@@ -165,16 +165,38 @@ and connector ids restart at 1 on each board - EVerest forces that. Create three
 CSMS, OCPP 1.6J, security profile 2, and note the authorisation key it issues for each. They are not
 interchangeable.
 
+**Use your own name, not someone else's.** The identity is a prefix and the boards become
+`<prefix>_1`, `_2`, `_3`. The generator lives in the EVerest-MCP repo but has to run *inside* this
+container, and EVerest-MCP is not mounted here - so copy it in:
+
 ```bash
-cp .devcontainer/monta-credentials.example.env .devcontainer/monta-credentials.env
-# fill in MONTA_CP_1..3 and MONTA_KEY_1..3
-./.devcontainer/monta-setup.sh
+docker cp <EVerest-MCP>/sim/make_vsecc_ocpp_configs.py devcontainer-devcontainer-1:/tmp/gen.py
+
+# 1. Dry run first. Points every board at a dead URI, so the topology is proven to boot without
+#    three websockets turning up at the real CSMS.
+docker exec devcontainer-devcontainer-1 sh -c "python3 /tmp/gen.py --prefix YOURNAME_EVEREST"
+
+# 2. Create YOURNAME_EVEREST_1..3 in the CSMS, then put their keys in the keys file - one per
+#    charge point, they are not interchangeable, and it must never be committed:
+#      /build/monta/vsecc-keys.json
+#      { "YOURNAME_EVEREST_1": "...", "YOURNAME_EVEREST_2": "...", "YOURNAME_EVEREST_3": "..." }
+
+# 3. For real.
+docker exec devcontainer-devcontainer-1 sh -c "python3 /tmp/gen.py --prefix YOURNAME_EVEREST --live"
 ```
 
-That writes `/build/monta/vsecc{1,2,3}/ocpp-monta.json` from `ocpp-monta.example.json`, filling in
-the three fields that differ per board and leaving the other forty alone. It refuses to overwrite an
-existing config unless you pass `--force`, because each board keeps its own OCPP database and a
-config whose identity no longer matches its database is a confusing thing to debug.
+It writes `/build/monta/vsecc{1,2,3}/ocpp-monta.json` from `ocpp-monta.example.json` in this
+directory, so every unrelated setting - meter intervals, feature profiles, the 375 kW limit - carries
+over unchanged. **Edit the template, never the generated files.** It refuses to let two boards share
+an authorisation key unless you pass `--allow-shared-key`, because that is usually a copy-paste slip.
+
+> **The `sh -c "..."` wrapper is not decoration - on Windows Git Bash it is required.** MSYS rewrites
+> anything that looks like an absolute Unix path in a `docker exec` argument into a Windows path
+> before Docker sees it, so a bare `docker exec ... python3 /tmp/gen.py` fails with
+> `can't open file '/workspace/C:/Users/.../gen.py'`. Quoting the whole command hides the paths from
+> the rewrite. `MSYS_NO_PATHCONV=1` also works; PowerShell does not have the problem. Worse than the
+> error: `--root /tmp/whatever` gets rewritten the same way, so a run can appear to succeed while
+> writing its output into a stray `C:` directory on your host.
 
 Then point the stack at the OCPP config and recreate:
 
@@ -183,9 +205,9 @@ echo 'EVEREST_CONFIG=/workspace/config/config-sil-6evse-3vsecc.yaml' >> .devcont
 ./.devcontainer/sil-up.sh --force-recreate
 ```
 
-**Nothing with a key in it is in this repo, and it must stay that way.** The configs live on the
-`everest-build` volume; `monta-credentials.env` is gitignored. Only the template and the example are
-tracked.
+**Nothing with a key in it is in this repo, and it must stay that way.** The generated configs and
+`vsecc-keys.json` live on the `everest-build` volume, which is not a git repository. Only the
+template is tracked, and its `AuthorizationKey` is a placeholder.
 
 Two things that catch people out:
 

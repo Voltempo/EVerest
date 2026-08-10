@@ -11,7 +11,7 @@
 start-monta.ps1
 monta/
 
-# Live CSMS authorisation keys, one per vSECC board. monta-setup.sh reads this file and writes the
-# per-board configs onto the /build volume, so nothing with a key in it is ever inside the repo.
+# Live Monta authorisation keys, one per vSECC board. monta-setup.sh reads this and writes them into
+# /build/monta/vsecc-keys.json inside the container, so nothing with a key in it is ever in the repo.
 # monta-credentials.example.env IS tracked.
 monta-credentials.env
