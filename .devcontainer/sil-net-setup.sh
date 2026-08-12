@@ -47,10 +47,21 @@ for (( i = 1; i <= COUNT; i++ )); do
     evse="ev${i}-evse"
     car="ev${i}-car"
 
+    # Pin the MAC addresses rather than letting the kernel pick. The simulated car has no configured EVCCID
+    # unless one is set at runtime, so it announces its interface MAC instead - and with Autocharge on, the CSMS
+    # sees that as "VID:<mac>" and authorises against it. A kernel-assigned MAC is random per link creation, and
+    # these links live in the container's network namespace, so every docker restart silently gives all six
+    # vehicles new identities and a CSMS that recognised them yesterday answers Blocked today.
+    #
+    # Locally administered (02:...), "VT" for Voltempo, then 0c or 0e for the car and EVSE ends, then the
+    # connector number. So connector 1's car is 02:56:54:00:0c:01 and announces VID:0256540000C001.
+    car_mac=$(printf '02:56:54:00:0c:%02x' "${i}")
+    evse_mac=$(printf '02:56:54:00:0e:%02x' "${i}")
+
     if ip link show "${evse}" > /dev/null 2>&1; then
         (( existing += 1 ))
     else
-        "${SUDO[@]}" ip link add "${evse}" type veth peer name "${car}"
+        "${SUDO[@]}" ip link add "${evse}" address "${evse_mac}" type veth peer name "${car}" address "${car_mac}"
         (( created += 1 ))
     fi
 

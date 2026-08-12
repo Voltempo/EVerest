@@ -16,13 +16,29 @@
     "NumberOfConnectors is 2 because one vSECC serves two connectors. Connector ids restart at 1 on",
     "each board, so all three boards report connectors 1 and 2 - EVerest forces that.",
     "",
+    "DisableSecurityEventNotifications is true because libocpp carries SecurityEventNotification.req in",
+    "the TRANSACTION queue, which is strictly ordered with one message in flight. A CSMS that does not",
+    "answer one - Monta does not - leaves it stuck at the head, and every StartTransaction, MeterValues",
+    "and StopTransaction behind it is stranded. The symptom is brutal: the charger charges perfectly,",
+    "connection_status still reads connected, and the CSMS never learns the transaction exists, so its",
+    "own stop button fails with no message on the wire at all. Observed 2026-08-11 with 41 messages",
+    "stranded behind 18 boot notices. The flag also drops already-persisted ones at startup, so setting",
+    "it clears an existing jam.",
+    "",
+    "AuthorizationCacheEnabled is false deliberately, and this is a test-rig decision rather than a",
+    "faithful one. libocpp caches every idTagInfo the CSMS returns and, per OCPP 1.6, honours a cached",
+    "Blocked without asking again - LocalPreAuthorize false does not change that. On a real charger that",
+    "is what carries it through a CSMS outage. On this rig it means a token you have just fixed in the",
+    "CSMS keeps being refused locally, with no message on the wire to say why, until someone deletes the",
+    "row from AUTH_CACHE. That cost an afternoon on 2026-08-11. Turn it back on if the cache itself is",
+    "what is being tested.",
+    "",
     "CompositeScheduleDefaultLimitWatts is what the CSMS assumes when no profile is active. It is set",
     "to 375 kW to match what a Voltempo connector can actually deliver. Monta's own default is 240 kW,",
     "which would silently cap every session a third below the cable rating and make the charger's 80 kW",
     "power-sharing steps invisible above five vehicles. A charging profile is only observable if it",
     "asks for less than this figure."
   ],
-
   "Internal": {
     "ChargePointId": "REPLACE_ME",
     "CentralSystemURI": "wss://ocpp.monta.app",
@@ -32,12 +48,15 @@
     "FirmwareVersion": "2026.10.0",
     "AllowChargingProfileWithoutStartSchedule": true,
     "UseTPM": false,
-    "LogMessagesFormat": ["html", "security"],
+    "LogMessagesFormat": [
+      "html",
+      "security"
+    ],
     "CompositeScheduleDefaultLimitWatts": 375000,
     "CompositeScheduleDefaultLimitAmps": 500
   },
-
   "Core": {
+    "AuthorizationCacheEnabled": false,
     "AuthorizeRemoteTxRequests": false,
     "ClockAlignedDataInterval": 900,
     "ConnectionTimeOut": 30,
@@ -60,36 +79,31 @@
     "UnlockConnectorOnEVSideDisconnect": true,
     "WebSocketPingInterval": 30
   },
-
   "FirmwareManagement": {
     "SupportedFileTransferProtocols": "FTP"
   },
-
   "Security": {
     "CpoName": "EVerest",
     "SecurityProfile": 2,
-    "AuthorizationKey": "REPLACE_ME_WITH_THE_CSMS_KEY"
+    "AuthorizationKey": "REPLACE_ME_WITH_THE_CSMS_KEY",
+    "DisableSecurityEventNotifications": true
   },
-
   "LocalAuthListManagement": {
     "LocalAuthListEnabled": true,
     "LocalAuthListMaxLength": 42,
     "SendLocalListMaxLength": 42
   },
-
   "SmartCharging": {
     "ChargeProfileMaxStackLevel": 42,
     "ChargingScheduleAllowedChargingRateUnit": "Current,Power",
     "ChargingScheduleMaxPeriods": 42,
     "MaxChargingProfilesInstalled": 42
   },
-
   "PnC": {
     "ISO15118CertificateManagementEnabled": true,
     "ISO15118PnCEnabled": false,
     "ContractValidationOffline": true
   },
-
   "CostAndPrice": {
     "CustomDisplayCostAndPrice": false
   }
