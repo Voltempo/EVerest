@@ -1035,14 +1035,38 @@ active_modules:
       main:
         mqtt_topic: everest_api/dummy_token_provider_1/cmd/provide
   ocpp_1:
-    module: OCPP
+    module: OCPPmulti
     config_module:
       # A charge point of its own: separate identity, separate credential, separate message queue.
       # The identity lives in this file and libocpp appends it to CentralSystemURI, so each board
       # needs its own charge point created in the CSMS.
+      #
+      # OCPPmulti speaks 1.6, 2.0.1 and 2.1. Only2 pins this to 2.0.1; Prefer2 would silently fall
+      # back to 1.6 if the CSMS declined, which presents a misconfiguration as a working charger on
+      # the wrong protocol - the one failure you would not go looking for.
+      #
+      # EnableLegacyConfigMigration must stay false. It is annotated "OCPP 1.6" in the manifest and
+      # does not read ocpp-monta.json in Only2 mode - but it still runs, and it "overwrites any
+      # existing attribute values in the target slot", so it lands cp001 and an empty
+      # NetworkConnectionProfiles on top of the component config that was just seeded correctly.
+      # The symptom is every board dialling libocpp's stock ws://localhost:9000/cp001 while the
+      # JSON and the component config both plainly say otherwise.
+      #
+      # So in Only2 the connection details come from DeviceModelConfigPath below, NOT from
+      # ChargePointConfigPath. ocpp-monta.json is still read for the 1.6 settings and is what you
+      # would switch back to with Mode: Only1.6. Both are written by the same generator run.
+      Mode: Only2
+      EnableLegacyConfigMigration: false
       ChargePointConfigPath: /build/monta/vsecc1/ocpp-monta.json
       UserConfigPath: /build/monta/vsecc1/user_config.json
       DatabasePath: /build/monta/vsecc1/db
+      CoreDatabasePath: /build/monta/vsecc1/db
+      DeviceModelDatabasePath: /build/monta/vsecc1/device_model_storage.db
+      EverestDeviceModelDatabasePath: /build/monta/vsecc1/everest_device_model_storage.db
+      # Per board, not the shared install: the CSMS URL, security profile and Identity all differ
+      # between boards, and in Only2 mode these files - not ocpp-monta.json - are what libocpp reads.
+      # Seeded by sim/seed_2_0_1_component_config.py.
+      DeviceModelConfigPath: /build/monta/vsecc1/component_config
       MessageLogPath: /build/monta/vsecc1/logs
       RequestCompositeScheduleUnit: W
     connections:
@@ -1148,14 +1172,21 @@ active_modules:
       main:
         mqtt_topic: everest_api/dummy_token_provider_2/cmd/provide
   ocpp_2:
-    module: OCPP
+    module: OCPPmulti
     config_module:
       # A charge point of its own: separate identity, separate credential, separate message queue.
       # The identity lives in this file and libocpp appends it to CentralSystemURI, so each board
-      # needs its own charge point created in the CSMS.
+      # needs its own charge point created in the CSMS. See ocpp_1 for why Only2 rather than Prefer2,
+      # and for the device model DB you have to delete when the CSMS changes.
+      Mode: Only2
+      EnableLegacyConfigMigration: false
       ChargePointConfigPath: /build/monta/vsecc2/ocpp-monta.json
       UserConfigPath: /build/monta/vsecc2/user_config.json
       DatabasePath: /build/monta/vsecc2/db
+      CoreDatabasePath: /build/monta/vsecc2/db
+      DeviceModelDatabasePath: /build/monta/vsecc2/device_model_storage.db
+      EverestDeviceModelDatabasePath: /build/monta/vsecc2/everest_device_model_storage.db
+      DeviceModelConfigPath: /build/monta/vsecc2/component_config
       MessageLogPath: /build/monta/vsecc2/logs
       RequestCompositeScheduleUnit: W
     connections:
@@ -1261,14 +1292,21 @@ active_modules:
       main:
         mqtt_topic: everest_api/dummy_token_provider_3/cmd/provide
   ocpp_3:
-    module: OCPP
+    module: OCPPmulti
     config_module:
       # A charge point of its own: separate identity, separate credential, separate message queue.
       # The identity lives in this file and libocpp appends it to CentralSystemURI, so each board
-      # needs its own charge point created in the CSMS.
+      # needs its own charge point created in the CSMS. See ocpp_1 for why Only2 rather than Prefer2,
+      # and for the device model DB you have to delete when the CSMS changes.
+      Mode: Only2
+      EnableLegacyConfigMigration: false
       ChargePointConfigPath: /build/monta/vsecc3/ocpp-monta.json
       UserConfigPath: /build/monta/vsecc3/user_config.json
       DatabasePath: /build/monta/vsecc3/db
+      CoreDatabasePath: /build/monta/vsecc3/db
+      DeviceModelDatabasePath: /build/monta/vsecc3/device_model_storage.db
+      EverestDeviceModelDatabasePath: /build/monta/vsecc3/everest_device_model_storage.db
+      DeviceModelConfigPath: /build/monta/vsecc3/component_config
       MessageLogPath: /build/monta/vsecc3/logs
       RequestCompositeScheduleUnit: W
     connections:
